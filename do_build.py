@@ -1,10 +1,16 @@
+import os
 import sys
 import unittest
+from pathlib import Path
 import PyInstaller.__main__
+
+PROJECT_DIR = Path(__file__).resolve().parent
+os.chdir(PROJECT_DIR)
+
 
 print("[*] Running unit tests...")
 loader = unittest.TestLoader()
-suite = loader.discover(".", pattern="test_*.py")
+suite = loader.discover(str(PROJECT_DIR), pattern="test_*.py")
 runner = unittest.TextTestRunner(verbosity=2)
 result = runner.run(suite)
 
@@ -12,7 +18,8 @@ if not result.wasSuccessful():
     print("[X] Unit tests failed!")
     sys.exit(1)
 
-print("[+] Unit tests passed. Building single executable file...")
+print(f"[+] Unit tests passed. Building single executable file in {PROJECT_DIR}...")
+
 
 PyInstaller.__main__.run([
     '--noconfirm',

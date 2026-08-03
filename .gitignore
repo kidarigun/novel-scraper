@@ -9,6 +9,7 @@ __pycache__/
 # Cache and Runtime logs
 _cache/
 *.log
+*.txt
 시작오류.txt
 selftest_error.txt
 scrapetest_error.txt

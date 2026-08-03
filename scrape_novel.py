@@ -43,7 +43,7 @@ SEP = "[[[NL]]]"
 # 우선순위로 찾는다. 이 코드는 이미 브라우저에 정상 표시된 본문만 읽으며, 인증/차단을
 # 우회하거나 별도 API를 호출하지 않는다.
 EXTRACT_JS = r"""
-(maxMs) => new Promise((resolve) => {
+(maxMs) => new Promise(async (resolve) => {
   const SEP = "%SEP%";
   const MIN_LENGTH = 50;
   const start = Date.now();
@@ -61,7 +61,7 @@ EXTRACT_JS = r"""
       if (['script', 'style', 'noscript', 'template', 'nav', 'header', 'footer',
            'aside', 'form', 'button'].includes(tag)) return true;
       if (current.matches && current.matches(
-          '[aria-hidden="true"], .advertisement, .ad-banner, .pagination')) {
+          '[aria-hidden="true"], .advertisement, .ad-banner, .pagination, #viewcomment, .theme-novel-nav, .theme-novel-tools, .page-title')) {
         return true;
       }
     }
@@ -97,19 +97,18 @@ EXTRACT_JS = r"""
     try {
       blocks = Array.from(container.querySelectorAll(blockSelector)).filter((node) => {
         if (isIgnored(node)) return false;
-        // 자식 요소 중 동일 블록 태그가 없는 최하단 텍스트 노드 선택
         return !node.querySelector('p,pre,blockquote,div[data-novel-line]');
       });
     } catch(e) {}
 
     const parts = blocks.map((node) => clean(node.innerText || node.textContent))
-      .filter((txt) => txt.length > 0 && !txt.includes('본문 불러오는 중'));
+      .filter((txt) => txt.length > 0 && !txt.includes('본문 불러오는 중') && !txt.includes('등록된 회차 댓글이 없습니다'));
     if (parts.length) return parts;
 
     return clean(container.innerText || container.textContent)
       .split(/\n+/)
       .map(clean)
-      .filter((txt) => txt.length > 0 && !txt.includes('본문 불러오는 중'));
+      .filter((txt) => txt.length > 0 && !txt.includes('본문 불러오는 중') && !txt.includes('등록된 회차 댓글이 없습니다'));
   };
 
   const bestFor = (selector) => {
@@ -145,8 +144,7 @@ EXTRACT_JS = r"""
     '.view-content',
     '#view_atcl',
     'article',
-    'main',
-    'div'
+    'main'
   ];
 
   const extract = () => {
@@ -154,6 +152,136 @@ EXTRACT_JS = r"""
       const candidate = bestFor(selector);
       if (candidate && candidate.text.length >= MIN_LENGTH) return candidate;
     }
+    return null;
+  };
+
+  const tryDirectApiDecrypt = async () => {
+    try {
+      const dataEl = document.getElementById('theme-novel-viewer-data');
+      if (!dataEl) return null;
+      let cfg = {};
+      try { cfg = JSON.parse(dataEl.textContent || '{}'); } catch(e) { return null; }
+      if (!cfg.novelId || !cfg.episodeId || !cfg.token) return null;
+
+      function toB64Url(bytes) {
+        let bin = "";
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      }
+      function fromB64Url(s) {
+        const pad = s.length % 4 === 0 ? "" : new Array(5 - (s.length % 4)).join("=");
+        const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+      }
+      function readCookie(name) {
+        const raw = document.cookie || "";
+        const parts = raw.split(";");
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i].trim();
+          if (p.slice(0, name.length + 1) === name + "=") return decodeURIComponent(p.slice(name.length + 1));
+        }
+        return "";
+      }
+      function makeNonce() {
+        const a = new Uint8Array(24);
+        crypto.getRandomValues(a);
+        return toB64Url(a);
+      }
+      async function hmacSha256B64(keyText, message) {
+        const enc = new TextEncoder();
+        const k = await crypto.subtle.importKey("raw", enc.encode(keyText), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+        const sig = await crypto.subtle.sign("HMAC", k, enc.encode(message));
+        return toB64Url(new Uint8Array(sig));
+      }
+      function unshuffleParagraphs(shuffled, perm) {
+        if (!Array.isArray(shuffled) || !Array.isArray(perm) || shuffled.length !== perm.length) return shuffled || [];
+        const restored = new Array(shuffled.length);
+        const seen = new Array(shuffled.length).fill(false);
+        for (let i = 0; i < shuffled.length; i++) {
+          const originalIndex = perm[i];
+          if (!Number.isInteger(originalIndex) || originalIndex < 0 || originalIndex >= shuffled.length || seen[originalIndex]) return shuffled;
+          seen[originalIndex] = true;
+          restored[originalIndex] = shuffled[i];
+        }
+        return restored;
+      }
+
+      let nvCookie = readCookie("nv");
+      if (!nvCookie || nvCookie.length < 40) {
+        try {
+          const res = await fetch("/api/nv-issue", { method: "POST", credentials: "same-origin", cache: "no-store" });
+          const d = await res.json();
+          if (d && d.session) nvCookie = d.session;
+        } catch(e) {}
+      }
+      if (!nvCookie) nvCookie = readCookie("nv");
+      if (!nvCookie) return null;
+
+      const nonce = makeNonce();
+      const proof = await hmacSha256B64(nvCookie, String(cfg.token) + "." + nonce);
+
+      const contentRes = await fetch("/api/novel-content", {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          "content-type": "application/json",
+          "x-novel-client": "shadow-v3",
+          "x-nv-session": nvCookie
+        },
+        body: JSON.stringify({ novelId: cfg.novelId, episodeId: cfg.episodeId, token: cfg.token, nonce: nonce, proof: proof })
+      });
+
+      const jsonRes = await contentRes.json().catch(() => ({}));
+      if (!contentRes.ok || !jsonRes.ok || !jsonRes.payload) {
+        if (jsonRes && jsonRes.error) {
+          window.__api_extract_error = jsonRes.error;
+        }
+        return null;
+      }
+
+      const nvKey = fromB64Url(nvCookie.split(".")[0] || "");
+      const enc = new TextEncoder();
+      const tail = enc.encode(":" + cfg.novelId + ":" + cfg.episodeId + ":v3");
+      const input = new Uint8Array(nvKey.length + tail.length);
+      input.set(nvKey, 0);
+      input.set(tail, nvKey.length);
+
+      const hash = await crypto.subtle.digest("SHA-256", input);
+      const key = await crypto.subtle.importKey("raw", hash, { name: "AES-GCM" }, false, ["decrypt"]);
+
+      const payloadData = fromB64Url(jsonRes.payload);
+      const iv = payloadData.slice(0, 12);
+      const body = payloadData.slice(12);
+
+      const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv, tagLength: 128 }, key, body);
+      const decoded = new TextDecoder("utf-8").decode(plain);
+
+      let payloadObj = null;
+      if (decoded && decoded.charAt(0) === '{') {
+        try { payloadObj = JSON.parse(decoded); } catch(e) {}
+      }
+
+      let lines = [];
+      if (payloadObj && payloadObj.kind === "html" && typeof payloadObj.html === "string") {
+        const tmp = document.createElement("div");
+        tmp.innerHTML = payloadObj.html;
+        lines = (tmp.innerText || tmp.textContent || "").split(/\n+/).map(s => s.trim()).filter(s => s.length > 0);
+      } else if (payloadObj && payloadObj.kind === "text-shuffled" && Array.isArray(payloadObj.paragraphs) && Array.isArray(payloadObj.perm)) {
+        lines = unshuffleParagraphs(payloadObj.paragraphs, payloadObj.perm);
+      } else if (payloadObj && payloadObj.kind === "text" && Array.isArray(payloadObj.paragraphs)) {
+        lines = payloadObj.paragraphs;
+      } else {
+        lines = String(decoded || "").split(/\n{2,}/).map(s => s.trim()).filter(s => s.length > 0);
+      }
+
+      if (lines.length > 0) {
+        const text = lines.join(SEP);
+        return { selector: 'api-direct-decrypt', parts: lines, text, score: text.length + 5000 };
+      }
+    } catch(e) {}
     return null;
   };
 
@@ -181,8 +309,11 @@ EXTRACT_JS = r"""
     resolve(result);
   };
 
-  const tick = () => {
-    const candidate = extract();
+  const tick = async () => {
+    let candidate = extract();
+    if (!candidate) {
+      candidate = await tryDirectApiDecrypt();
+    }
     if ((candidate && candidate.text.length >= MIN_LENGTH) || Date.now() - start > maxMs) {
       finish(candidate, Date.now() - start > maxMs);
       return;
