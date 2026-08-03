@@ -1,0 +1,26 @@
+# PyInstaller / Build outputs
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+
+# Cache and Runtime logs
+_cache/
+*.log
+시작오류.txt
+selftest_error.txt
+scrapetest_error.txt
+
+# Environment
+venv/
+.venv/
+env/
+.env
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
