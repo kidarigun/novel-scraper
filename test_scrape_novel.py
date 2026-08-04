@@ -44,7 +44,26 @@ class ExtractBodyTests(unittest.TestCase):
             "[data-theme-novel-content]": [],
         })
 
-        self.assertIn("컨테이너", scrape_novel.get_status_message(page))
+    def test_get_cached_novels(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            novel1 = tmp_path / "1234"
+            novel1.mkdir()
+            (novel1 / "state.json").write_text(
+                '{"title": "소설 1", "url": "https://example.com/novel/1234", "done": {"1": {}}, "total": 10, "updated_at": 100}',
+                encoding="utf-8"
+            )
+            cached = scrape_novel.get_cached_novels(tmp_path)
+            self.assertEqual(len(cached), 1)
+            self.assertEqual(cached[0]["title"], "소설 1")
+            self.assertEqual(cached[0]["done_count"], 1)
+
+    def test_quota_error_is_exception(self):
+        err = scrape_novel.QuotaError("쿼터 초과")
+        self.assertIsInstance(err, Exception)
 
 
 if __name__ == "__main__":

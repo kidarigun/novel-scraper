@@ -110,24 +110,34 @@ class ScraperGUI:
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
 
+        # 최근 수집 이력 (이어받기)
+        ttk.Label(frm, text="이전 수집 이력").grid(row=0, column=0, sticky="w", **pad)
+        self.cached_novels_map = {}
+        self.history_var = tk.StringVar()
+        self.history_cb = ttk.Combobox(frm, textvariable=self.history_var, state="readonly")
+        self.history_cb.grid(row=0, column=1, sticky="ew", **pad)
+        self.history_cb.bind("<<ComboboxSelected>>", self.on_history_selected)
+        ttk.Button(frm, text="이어서 수집", command=self.load_history_click).grid(
+            row=0, column=2, sticky="e", **pad)
+
         # URL
-        ttk.Label(frm, text="소설 목록 URL").grid(row=0, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="소설 목록 URL").grid(row=1, column=0, sticky="w", **pad)
         self.url_var = tk.StringVar()
         url_entry = ttk.Entry(frm, textvariable=self.url_var)
-        url_entry.grid(row=0, column=1, columnspan=2, sticky="ew", **pad)
+        url_entry.grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
         url_entry.focus()
 
         # 출력 파일
-        ttk.Label(frm, text="저장 파일").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="저장 파일").grid(row=2, column=0, sticky="w", **pad)
         default_out = str(self._default_downloads() / "소설.txt")
         self.out_var = tk.StringVar(value=default_out)
-        ttk.Entry(frm, textvariable=self.out_var).grid(row=1, column=1, sticky="ew", **pad)
+        ttk.Entry(frm, textvariable=self.out_var).grid(row=2, column=1, sticky="ew", **pad)
         ttk.Button(frm, text="찾아보기…", command=self.browse_out).grid(
-            row=1, column=2, sticky="e", **pad)
+            row=2, column=2, sticky="e", **pad)
 
         # 옵션들
         opt = ttk.LabelFrame(frm, text="옵션")
-        opt.grid(row=2, column=0, columnspan=3, sticky="ew", padx=10, pady=8)
+        opt.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=8)
         for c in range(6):
             opt.columnconfigure(c, weight=1)
 
@@ -149,18 +159,21 @@ class ScraperGUI:
         ttk.Label(opt, text="프록시(선택)").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         self.proxy = tk.StringVar(value="")
         ttk.Entry(opt, textvariable=self.proxy).grid(
-            row=1, column=1, columnspan=3, sticky="ew", padx=6)
+            row=1, column=1, columnspan=2, sticky="ew", padx=6)
 
         self.headful = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt, text="브라우저 창 표시", variable=self.headful).grid(
-            row=1, column=4, sticky="w", padx=6)
+        ttk.Checkbutton(opt, text="창 표시", variable=self.headful).grid(
+            row=1, column=3, sticky="w", padx=6)
         self.solve_cf = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt, text="Cloudflare 우회", variable=self.solve_cf).grid(
+        ttk.Checkbutton(opt, text="CF 우회", variable=self.solve_cf).grid(
+            row=1, column=4, sticky="w", padx=6)
+        self.auto_quota_retry = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt, text="쿼터시 1시간후 자동재시도", variable=self.auto_quota_retry).grid(
             row=1, column=5, sticky="w", padx=6)
 
         # 버튼
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10)
+        btns.grid(row=4, column=0, columnspan=3, sticky="ew", padx=10)
         self.start_btn = ttk.Button(btns, text="시작", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text="중지", command=self.stop, state="disabled")
@@ -172,21 +185,54 @@ class ScraperGUI:
 
         # 진행률
         self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=4, column=0, columnspan=3, sticky="ew", padx=10, pady=6)
+        self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=6)
         self.status_var = tk.StringVar(value="대기 중")
         ttk.Label(frm, textvariable=self.status_var).grid(
-            row=5, column=0, columnspan=3, sticky="w", padx=10)
+            row=6, column=0, columnspan=3, sticky="w", padx=10)
 
         # 로그
-        self.log_txt = tk.Text(frm, height=14, wrap="word", state="disabled")
-        self.log_txt.grid(row=6, column=0, columnspan=3, sticky="nsew", padx=10, pady=8)
-        frm.rowconfigure(6, weight=1)
+        self.log_txt = tk.Text(frm, height=13, wrap="word", state="disabled")
+        self.log_txt.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=10, pady=8)
+        frm.rowconfigure(7, weight=1)
         sb = ttk.Scrollbar(frm, command=self.log_txt.yview)
-        sb.grid(row=6, column=3, sticky="ns", pady=8)
+        sb.grid(row=7, column=3, sticky="ns", pady=8)
         self.log_txt["yscrollcommand"] = sb.set
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.refresh_history_list()
         self.root.after(100, self._drain_queue)
+
+    def refresh_history_list(self):
+        novels = scrape_novel.get_cached_novels()
+        self.cached_novels_map.clear()
+        display_list = []
+        for n in novels:
+            total_str = f"{n['total']}" if n['total'] else "?"
+            pct = f" ({int(n['done_count']/n['total']*100)}%)" if n['total'] else ""
+            label = f"{n['title']} [{n['done_count']}/{total_str}화 완료]{pct}"
+            self.cached_novels_map[label] = n
+            display_list.append(label)
+        self.history_cb["values"] = display_list
+        if display_list and not self.history_var.get():
+            self.history_var.set(display_list[0])
+
+    def on_history_selected(self, event=None):
+        label = self.history_var.get()
+        item = self.cached_novels_map.get(label)
+        if item:
+            self.url_var.set(item["url"])
+            safe_name = scrape_novel._safe_filename(item["title"])
+            out_file = str(self._default_downloads() / f"{safe_name}.txt")
+            if not self.out_var.get() or "소설.txt" in self.out_var.get():
+                self.out_var.set(out_file)
+
+    def load_history_click(self):
+        label = self.history_var.get()
+        if not label:
+            messagebox.showinfo("이력 없음", "이전에 수집 중이던 소설 이력이 없습니다.")
+            return
+        self.on_history_selected()
+        self.start()
 
     # ---- helpers ----
     @staticmethod
@@ -291,6 +337,24 @@ class ScraperGUI:
             )
             result["ok"] = True
             result["path"] = path
+        except scrape_novel.QuotaError as e:
+            if self.auto_quota_retry.get() and not self.stop_event.is_set():
+                self._log(f"\n[쿼터 한도 대기] 일일 열람 제한에 도달했습니다: {e}")
+                self._log("[자동 재시도 모드] 60분 후 자동으로 남아있는 화를 이어서 수집합니다...")
+                import time
+                wait_secs = 3600
+                for s in range(wait_secs, 0, -1):
+                    if self.stop_event.is_set():
+                        break
+                    if s % 300 == 0 or s == wait_secs or s <= 10:
+                        mins = s // 60
+                        self.status_var.set(f"쿼터 대기 중… {mins}분 후 재시도")
+                    time.sleep(1)
+                if not self.stop_event.is_set():
+                    self._log("\n[*] 쿼터 대기 완료. 수집을 재개합니다!")
+                    return self._run(**params)
+            result["error"] = str(e)
+            self._log(f"[오류] {e}")
         except Exception as e:  # noqa: BLE001
             result["error"] = str(e)
             self._log(f"[오류] {e}")
@@ -299,6 +363,7 @@ class ScraperGUI:
     def _on_finished(self, result):
         self.start_btn["state"] = "normal"
         self.stop_btn["state"] = "disabled"
+        self.refresh_history_list()
         if result["ok"]:
             self.status_var.set("완료")
             if messagebox.askyesno("완료", f"저장 완료:\n{result['path']}\n\n폴더를 열까요?"):

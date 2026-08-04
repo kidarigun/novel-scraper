@@ -338,6 +338,10 @@ class BlockedError(Exception):
     """사이트가 본문 제공을 거부(인증 요구/차단)해 진행이 무의미한 상태."""
 
 
+class QuotaError(Exception):
+    """일일 열람 쿼터 초과(429/인증 요구) 상태."""
+
+
 def _norm(s):
     return re.sub(r"\s+", "", s or "")
 
@@ -503,6 +507,37 @@ def derive_novel_title(chapters, fallback):
     return fallback
 
 
+def get_cached_novels(cache_root=None):
+    """CACHE_ROOT를 탐색해 이전에 수집(진행 중 포함)된 소설 목록 정보 반환."""
+    root = Path(cache_root) if cache_root else CACHE_ROOT
+    if not root.exists():
+        return []
+    results = []
+    for p in root.iterdir():
+        if p.is_dir():
+            state_file = p / "state.json"
+            if state_file.exists():
+                try:
+                    data = json.loads(state_file.read_text(encoding="utf-8"))
+                    url = data.get("url") or f"https://newtoki1.org/novel/{p.name}"
+                    title = data.get("title") or f"소설 {p.name}"
+                    done_count = len(data.get("done", {}))
+                    total = data.get("total", 0)
+                    updated_at = data.get("updated_at", 0)
+                    results.append({
+                        "novel_id": p.name,
+                        "title": title,
+                        "url": url,
+                        "done_count": done_count,
+                        "total": total,
+                        "updated_at": updated_at,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+    results.sort(key=lambda x: x["updated_at"], reverse=True)
+    return results
+
+
 def _load_state(path):
     if path.exists():
         try:
@@ -512,8 +547,26 @@ def _load_state(path):
     return {"done": {}}
 
 
-def _save_state(path, state):
+def _save_state(path, state, title=None, url=None, total=None):
+    if title:
+        state["title"] = title
+    if url:
+        state["url"] = url
+    if total:
+        state["total"] = total
+    state["updated_at"] = time.time()
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir, stopped=False):
+    """현재까지 수집된 챕터들을 최종 txt 파일로 작성."""
+    with final_path.open("w", encoding="utf-8") as f:
+        f.write(f"{novel_title}\n출처: {url}\n총 {total}화"
+                f"{' (중단됨)' if stopped else ''}\n")
+        for idx, ch in enumerate(chapters, start=1):
+            ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
+            if ch_file.exists():
+                f.write(ch_file.read_text(encoding="utf-8"))
 
 
 def _safe_filename(name):
@@ -526,12 +579,6 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=4.0, max_delay=9.0,
            log=print, should_stop=None, on_progress=None):
     """
     소설을 스크래핑해 out_path(단일 txt)로 저장하고 그 경로를 반환.
-
-    out_path : 저장할 전체 경로. None 이면 out_dir(또는 스크립트 폴더)에
-               '소설제목.txt' 로 자동 저장.
-    log(str)            : 진행 로그 콜백
-    should_stop()->bool : True 면 중지
-    on_progress(done,total): 진행률 콜백
     """
     if StealthySession is None:
         raise RuntimeError(
@@ -556,6 +603,8 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=4.0, max_delay=9.0,
     log(f"[*] 세션 시작 (headless={not headful}, proxy={'예' if proxy else '아니오'})")
 
     stopped = False
+    quota_exceeded = False
+    blocked_msg = None
     with StealthySession(**session_kwargs) as session:
         log(f"[*] 목록 로딩: {url}")
         list_page = fetch_with_retry(session, url, solve_cf=solve_cf,
@@ -574,12 +623,12 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=4.0, max_delay=9.0,
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
         total = len(chapters)
+        _save_state(state_path, state, title=novel_title, url=url, total=total)
         log(f"[*] 소설: {novel_title}  /  총 {total}화  (완료 {len(state['done'])})")
         if on_progress:
             on_progress(len(state["done"]), total)
 
         consecutive_fail = 0
-        blocked_msg = None
         try:
             _interruptible_sleep(random.uniform(min_delay, max_delay), should_stop)
             for idx, ch in enumerate(chapters, start=1):
@@ -595,25 +644,49 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=4.0, max_delay=9.0,
                 page = fetch_with_retry(session, ch["url"], page_action=body_action,
                                         solve_cf=solve_cf, log=log,
                                         should_stop=should_stop)
+                
+                # Check for daily quota error in evaluate context
+                api_err = None
+                try:
+                    api_err = page.evaluate("() => window.__api_extract_error || ''")
+                except Exception:  # noqa: BLE001
+                    pass
+
+                if api_err == "captcha_required_daily_quota":
+                    quota_exceeded = True
+                    raise QuotaError("일일 열람 쿼터 초과 (captcha_required_daily_quota). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
+
                 body = extract_body(page, ch["title"])
                 if not body:
                     log("    ! 본문 비어있음. 6초 대기 후 재탐색")
                     _interruptible_sleep(6, should_stop)
-                    # 브라우저에 본문이 늦게 렌더링된 경우를 대비해 JS를 한번 더 재실행
                     try:
                         res = page.evaluate(EXTRACT_JS, content_timeout)
                         if isinstance(res, dict):
                             setattr(page, "_extracted_novel_data", res)
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         pass
+                    
+                    try:
+                        api_err = page.evaluate("() => window.__api_extract_error || ''")
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                    if api_err == "captcha_required_daily_quota":
+                        quota_exceeded = True
+                        raise QuotaError("일일 열람 쿼터 초과 (captcha_required_daily_quota). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
+
                     body = extract_body(page, ch["title"])
 
                 if not body:
-                    # 실패는 '완료'로 기록하지 않는다 (기록하면 이어받기가 영영 건너뜀).
                     consecutive_fail += 1
                     status = get_status_message(page)
                     log(f"    x 실패 ({consecutive_fail}/{max_consecutive_failures})"
                         + (f" — 사이트 메시지: {status}" if status else ""))
+                    if "쿼터" in status or "인증이 필요" in status:
+                        quota_exceeded = True
+                        raise QuotaError(f"일일 쿼터 한도 초과: {status}")
+
                     if consecutive_fail >= max_consecutive_failures:
                         raise BlockedError(
                             f"연속 {consecutive_fail}회 본문을 가져오지 못해 중단했습니다.\n\n"
@@ -630,8 +703,13 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=4.0, max_delay=9.0,
                 header = f"\n\n{'=' * 60}\n{ch['title']}\n{'=' * 60}\n\n"
                 ch_file.write_text(header + body, encoding="utf-8")
                 state["done"][key] = {"idx": idx, "title": ch["title"], "chars": len(body)}
-                _save_state(state_path, state)
+                _save_state(state_path, state, title=novel_title, url=url, total=total)
                 log(f"    -> 저장 ({len(body):,}자)")
+
+                # 실시간 중간 병합 (5화마다 진행)
+                if idx % 5 == 0:
+                    _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir, stopped=True)
+
                 if on_progress:
                     on_progress(idx, total)
 
@@ -645,21 +723,21 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=4.0, max_delay=9.0,
         except StopScrape:
             stopped = True
             log("[중지] 사용자 요청으로 중단. 수집된 분량까지 병합합니다.")
+        except QuotaError as e:
+            stopped = True
+            blocked_msg = str(e)
+            log(f"[쿼터제한] {blocked_msg}")
         except BlockedError as e:
             stopped = True
             blocked_msg = str(e)
             log(f"[차단] {blocked_msg}")
 
-    # 병합 (수집된 챕터까지)
+    # 최종 병합 (수집된 챕터까지)
     log(f"[*] 병합 -> {final_path}")
-    with final_path.open("w", encoding="utf-8") as f:
-        f.write(f"{novel_title}\n출처: {url}\n총 {total}화"
-                f"{' (중단됨)' if stopped else ''}\n")
-        for idx, ch in enumerate(chapters, start=1):
-            ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
-            if ch_file.exists():
-                f.write(ch_file.read_text(encoding="utf-8"))
+    _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir, stopped=stopped)
     log(f"[완료] {final_path} ({final_path.stat().st_size:,} bytes)")
+    if quota_exceeded:
+        raise QuotaError(blocked_msg or "일일 열람 쿼터 초과")
     if blocked_msg:
         raise BlockedError(blocked_msg)
     return str(final_path)
