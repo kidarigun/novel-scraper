@@ -142,12 +142,12 @@ class ScraperGUI:
             opt.columnconfigure(c, weight=1)
 
         ttk.Label(opt, text="최소 지연(초)").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.min_delay = tk.DoubleVar(value=4.0)
+        self.min_delay = tk.DoubleVar(value=15.0)
         ttk.Spinbox(opt, from_=0, to=60, increment=1, width=6,
                     textvariable=self.min_delay).grid(row=0, column=1, sticky="w")
 
         ttk.Label(opt, text="최대 지연(초)").grid(row=0, column=2, sticky="w", padx=6)
-        self.max_delay = tk.DoubleVar(value=9.0)
+        self.max_delay = tk.DoubleVar(value=20.0)
         ttk.Spinbox(opt, from_=0, to=120, increment=1, width=6,
                     textvariable=self.max_delay).grid(row=0, column=3, sticky="w")
 

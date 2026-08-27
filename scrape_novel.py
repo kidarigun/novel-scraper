@@ -573,7 +573,7 @@ def _safe_filename(name):
     return re.sub(r'[\\/:*?"<>|]', "_", name).strip()[:100] or "novel"
 
 
-def scrape(url, out_path=None, *, out_dir=None, min_delay=4.0, max_delay=9.0,
+def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
            rest_every=20, rest_secs=45.0, content_timeout=20000, proxy=None,
            solve_cf=False, headful=False, limit=0, max_consecutive_failures=3,
            log=print, should_stop=None, on_progress=None):
@@ -747,8 +747,8 @@ def main():
     ap = argparse.ArgumentParser(description="newtoki 연재 소설 -> 단일 텍스트 파일")
     ap.add_argument("url", help="소설 목록 URL (예: https://newtoki1.org/novel/62637)")
     ap.add_argument("--out", help="출력 txt 전체 경로 (기본: 소설제목.txt)")
-    ap.add_argument("--min-delay", type=float, default=4.0)
-    ap.add_argument("--max-delay", type=float, default=9.0)
+    ap.add_argument("--min-delay", type=float, default=15.0)
+    ap.add_argument("--max-delay", type=float, default=20.0)
     ap.add_argument("--rest-every", type=int, default=20)
     ap.add_argument("--rest-secs", type=float, default=45.0)
     ap.add_argument("--content-timeout", type=int, default=20000)
