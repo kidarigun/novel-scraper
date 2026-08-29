@@ -403,33 +403,81 @@ def _interruptible_sleep(secs, should_stop):
         time.sleep(min(0.3, end - time.time()))
 
 
-def extract_chapters(page, list_url):
+def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should_stop=None):
+    """소설 목록 페이지(모든 페이징 포함)에서 챕터 목록을 수집."""
     novel_id = parse_novel_id(list_url)
     base = re.match(r"(https?://[^/]+)", list_url).group(1)
     href_pat = re.compile(rf"/novel/{novel_id}/(\d+)")
-    items, seen = [], set()
-    for a in page.css("a"):
-        href = a.attrib.get("href", "") if a.attrib else ""
-        m = href_pat.search(href)
-        if not m:
-            continue
-        eid = m.group(1)
-        if eid in seen:
-            continue
-        seen.add(eid)
-        title = re.sub(r"\s+", " ", (a.get_all_text() or "").strip())
-        full_url = href if href.startswith("http") else base + href
-        num_m = re.search(r"-\s*(\d+)", title)
-        items.append({"episode_id": int(eid),
-                      "no": int(num_m.group(1)) if num_m else None,
-                      "title": title, "url": full_url})
+    page_pat = re.compile(rf"/novel/{novel_id}\?(?:epage|spage|p|page)=(\d+)")
+
+    visited_pages = set()
+    pending_pages = [list_url]
+    items, seen_eids = [], set()
+
+    if hasattr(session_or_page, "css"):
+        pages_to_process = [(list_url, session_or_page)]
+    else:
+        pages_to_process = []
+
+    detected_title = None
+
+    while pending_pages or pages_to_process:
+        if pages_to_process:
+            page_url, page = pages_to_process.pop(0)
+        else:
+            page_url = pending_pages.pop(0)
+            if page_url in visited_pages:
+                continue
+            visited_pages.add(page_url)
+            if should_stop and should_stop():
+                raise StopScrape()
+            page = fetch_with_retry(session_or_page, page_url, solve_cf=solve_cf,
+                                  log=log or (lambda m: None), should_stop=should_stop)
+
+        visited_pages.add(page_url)
+
+        if not detected_title:
+            t_el = page.css(".page-title") or page.css("title")
+            if t_el:
+                raw_t = t_el[0].get_all_text().strip()
+                raw_t = re.sub(r"\s*-\s*뉴토끼.*$", "", raw_t)
+                raw_t = re.sub(r"\s*완결소설.*$", "", raw_t)
+                raw_t = re.sub(r"\s+", " ", raw_t).strip()
+                if raw_t:
+                    detected_title = raw_t
+
+        for a in page.css("a"):
+            href = a.attrib.get("href", "") if a.attrib else ""
+            m = href_pat.search(href)
+            if not m:
+                continue
+            eid = m.group(1)
+            if eid in seen_eids:
+                continue
+            seen_eids.add(eid)
+            title = re.sub(r"\s+", " ", (a.get_all_text() or "").strip())
+            full_url = href if href.startswith("http") else base + href
+            num_m = re.search(r"-\s*(\d+)", title) or re.search(r"(\d+)\s*화", title)
+            items.append({"episode_id": int(eid),
+                          "no": int(num_m.group(1)) if num_m else None,
+                          "title": title, "url": full_url})
+
+        if not hasattr(session_or_page, "css"):
+            for a in page.css("a"):
+                href = a.attrib.get("href", "") if a.attrib else ""
+                if page_pat.search(href) or "epage=" in href or "spage=" in href:
+                    full_page_url = href if href.startswith("http") else base + href
+                    if full_page_url not in visited_pages and full_page_url not in pending_pages:
+                        pending_pages.append(full_page_url)
+
     if not items:
         raise ValueError("챕터 링크를 찾지 못했습니다. URL을 확인하세요.")
+
     if all(it["no"] is not None for it in items):
         items.sort(key=lambda it: it["no"])
     else:
         items.sort(key=lambda it: it["episode_id"])
-    return items
+    return items, detected_title
 
 
 def extract_body(page, chapter_title=""):
@@ -499,12 +547,14 @@ def get_status_message(page):
     return txt[:200]
 
 
-def derive_novel_title(chapters, fallback):
+def derive_novel_title(chapters, fallback, detected_title=None):
+    if detected_title and not re.match(r"^\d+\s*화$", detected_title):
+        return detected_title
     for ch in chapters:
         t = re.sub(r"\s*-\s*\d+.*$", "", ch["title"]).strip()
-        if t:
+        if t and not re.match(r"^\d+\s*화$", t):
             return t
-    return fallback
+    return detected_title or fallback
 
 
 def get_cached_novels(cache_root=None):
@@ -607,12 +657,10 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
     blocked_msg = None
     with StealthySession(**session_kwargs) as session:
         log(f"[*] 목록 로딩: {url}")
-        list_page = fetch_with_retry(session, url, solve_cf=solve_cf,
-                                     log=log, should_stop=should_stop)
-        chapters = extract_chapters(list_page, url)
+        chapters, detected_title = extract_chapters(session, url, solve_cf=solve_cf, log=log, should_stop=should_stop)
         if limit:
             chapters = chapters[:limit]
-        novel_title = derive_novel_title(chapters, novel_id)
+        novel_title = derive_novel_title(chapters, novel_id, detected_title)
 
         # 출력 경로 결정
         if out_path:
