@@ -34,8 +34,35 @@ try:
 except ImportError:
     StealthySession = None  # GUI에서 안내 메시지로 처리
 
-# 챕터 캐시 루트 (이어받기용). 사용자가 고른 출력 폴더는 깨끗하게 유지.
-CACHE_ROOT = Path(__file__).resolve().parent / "_cache"
+
+def get_app_dir():
+    """실행 파일(.exe)이 있는 디렉터리 또는 스크립트 디렉터리 반환."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def get_cache_root():
+    """
+    영구 캐시 디렉터리 반환.
+    실행 파일(.exe) 또는 스크립트 디렉터리 하위의 '_cache' 폴더를 우선 사용.
+    쓰기 권한이 없는 경우 사용자 홈 디렉터리의 '.novel_scraper_cache' 폴더 사용.
+    """
+    app_dir = get_app_dir()
+    primary = app_dir / "_cache"
+    try:
+        primary.mkdir(parents=True, exist_ok=True)
+        test_file = primary / ".writetest"
+        test_file.touch()
+        test_file.unlink()
+        return primary
+    except Exception:
+        fallback = Path.home() / ".novel_scraper_cache"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+CACHE_ROOT = get_cache_root()
 
 SEP = "[[[NL]]]"
 # 본문 DOM은 사이트 개편 때 가장 자주 달라지는 부분이다. 특정 host의 첫 shadow root만
@@ -238,6 +265,10 @@ EXTRACT_JS = r"""
       if (!contentRes.ok || !jsonRes.ok || !jsonRes.payload) {
         if (jsonRes && jsonRes.error) {
           window.__api_extract_error = jsonRes.error;
+        } else if (contentRes.status === 429) {
+          window.__api_extract_error = "captcha_required_daily_quota";
+        } else if (contentRes.status === 403) {
+          window.__api_extract_error = "access_denied_forbidden";
         }
         return null;
       }
@@ -561,33 +592,100 @@ def derive_novel_title(chapters, fallback, detected_title=None):
     return detected_title or fallback
 
 
+def is_quota_error(api_err, status=""):
+    combined = f"{api_err or ''} {status or ''}".lower()
+    quota_terms = ["quota", "captcha", "limit", "429", "쿼터", "한도", "인증", "열람", "차단", "잠시"]
+    return any(term in combined for term in quota_terms)
+
+
+def make_file_logger(log_func, *log_files):
+    def _log(msg):
+        log_func(msg)
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"[{ts}] {msg}\n"
+        for lf in log_files:
+            try:
+                lf.parent.mkdir(parents=True, exist_ok=True)
+                with lf.open("a", encoding="utf-8") as f:
+                    f.write(entry)
+            except Exception:  # noqa: BLE001
+                pass
+    return _log
+
+
+def _recover_from_txt_if_needed(final_path, url, chapters, chapters_dir, state, state_path, log=print):
+    """기존에 저장된 txt 파일이 존재할 경우, 그 안의 기수집 챕터들을 복원."""
+    if not final_path.exists():
+        return
+    try:
+        content = final_path.read_text(encoding="utf-8")
+        header_pat = re.compile(r"={50,}\n([^\n]+)\n={50,}\n", re.MULTILINE)
+        matches = list(header_pat.finditer(content))
+        if len(matches) > len(state.get("done", {})):
+            log(f"[*] 기존 저장 파일({final_path.name})에서 기수집된 {len(matches)}개 챕터를 발견하여 복원합니다.")
+            for idx in range(min(len(matches), len(chapters))):
+                ch = chapters[idx]
+                ch_idx = idx + 1
+                key = str(ch["episode_id"])
+                if key not in state["done"]:
+                    m = matches[idx]
+                    start_pos = m.start()
+                    end_pos = matches[idx + 1].start() if idx + 1 < len(matches) else len(content)
+                    ch_text = content[start_pos:end_pos]
+                    ch_file = chapters_dir / f"{ch_idx:04d}_{ch['episode_id']}.txt"
+                    if not ch_file.exists():
+                        ch_file.write_text(ch_text, encoding="utf-8")
+                    state["done"][key] = {"idx": ch_idx, "title": ch["title"], "chars": len(ch_text)}
+            _save_state(state_path, state, title=None, url=url, total=len(chapters))
+            log(f"[*] 총 {len(state['done'])}개 챕터 복원 완료! 이어서 수집을 시작합니다.")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def get_cached_novels(cache_root=None):
-    """CACHE_ROOT를 탐색해 이전에 수집(진행 중 포함)된 소설 목록 정보 반환."""
-    root = Path(cache_root) if cache_root else CACHE_ROOT
-    if not root.exists():
-        return []
-    results = []
-    for p in root.iterdir():
-        if p.is_dir():
-            state_file = p / "state.json"
-            if state_file.exists():
-                try:
-                    data = json.loads(state_file.read_text(encoding="utf-8"))
-                    url = data.get("url") or f"https://newtoki1.org/novel/{p.name}"
-                    title = data.get("title") or f"소설 {p.name}"
-                    done_count = len(data.get("done", {}))
-                    total = data.get("total", 0)
-                    updated_at = data.get("updated_at", 0)
-                    results.append({
-                        "novel_id": p.name,
-                        "title": title,
-                        "url": url,
-                        "done_count": done_count,
-                        "total": total,
-                        "updated_at": updated_at,
-                    })
-                except Exception:  # noqa: BLE001
-                    pass
+    """이전에 수집(진행 중 포함)된 소설 목록 정보 반환."""
+    roots = []
+    if cache_root:
+        roots.append(Path(cache_root))
+    else:
+        candidates = [
+            CACHE_ROOT,
+            get_app_dir() / "_cache",
+            Path.home() / ".novel_scraper_cache",
+            Path(__file__).resolve().parent / "_cache" if not getattr(sys, "frozen", False) else None
+        ]
+        for cd in candidates:
+            if cd and cd.exists() and cd not in roots:
+                roots.append(cd)
+
+    results_map = {}
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in root.iterdir():
+            if p.is_dir():
+                state_file = p / "state.json"
+                if state_file.exists():
+                    try:
+                        data = json.loads(state_file.read_text(encoding="utf-8"))
+                        url = data.get("url") or f"https://newtoki1.org/novel/{p.name}"
+                        title = re.sub(r"[\r\n\t\s]+", " ", data.get("title") or f"소설 {p.name}").strip()
+                        done_count = len(data.get("done", {}))
+                        total = data.get("total", 0)
+                        updated_at = data.get("updated_at", 0)
+                        novel_info = {
+                            "novel_id": p.name,
+                            "title": title,
+                            "url": url,
+                            "done_count": done_count,
+                            "total": total,
+                            "updated_at": updated_at,
+                        }
+                        if p.name not in results_map or results_map[p.name]["done_count"] < done_count:
+                            results_map[p.name] = novel_info
+                    except Exception:  # noqa: BLE001
+                        pass
+    results = list(results_map.values())
     results.sort(key=lambda x: x["updated_at"], reverse=True)
     return results
 
@@ -650,6 +748,10 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
     state_path = cache_dir / "state.json"
     state = _load_state(state_path)
 
+    app_log = CACHE_ROOT / "scraper.log"
+    novel_log = cache_dir / "scrape.log"
+    log = make_file_logger(log, app_log, novel_log)
+
     session_kwargs = {"headless": not headful, "block_webrtc": True}
     if proxy:
         session_kwargs["proxy"] = proxy
@@ -678,6 +780,7 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
 
         total = len(chapters)
         _save_state(state_path, state, title=novel_title, url=url, total=total)
+        _recover_from_txt_if_needed(final_path, url, chapters, chapters_dir, state, state_path, log=log)
         log(f"[*] 소설: {novel_title}  /  총 {total}화  (완료 {len(state['done'])})")
         if on_progress:
             on_progress(len(state["done"]), total)
@@ -706,9 +809,9 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                 except Exception:  # noqa: BLE001
                     pass
 
-                if api_err == "captcha_required_daily_quota":
+                if is_quota_error(api_err):
                     quota_exceeded = True
-                    raise QuotaError("일일 열람 쿼터 초과 (captcha_required_daily_quota). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
+                    raise QuotaError(f"일일 열람 쿼터 초과 ({api_err}). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
 
                 body = extract_body(page, ch["title"])
                 if not body:
@@ -726,9 +829,9 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                     except Exception:  # noqa: BLE001
                         pass
 
-                    if api_err == "captcha_required_daily_quota":
+                    if is_quota_error(api_err):
                         quota_exceeded = True
-                        raise QuotaError("일일 열람 쿼터 초과 (captcha_required_daily_quota). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
+                        raise QuotaError(f"일일 열람 쿼터 초과 ({api_err}). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
 
                     body = extract_body(page, ch["title"])
 
@@ -737,11 +840,18 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                     status = get_status_message(page)
                     log(f"    x 실패 ({consecutive_fail}/{max_consecutive_failures})"
                         + (f" — 사이트 메시지: {status}" if status else ""))
-                    if "쿼터" in status or "인증이 필요" in status:
+                    if is_quota_error(api_err, status):
                         quota_exceeded = True
-                        raise QuotaError(f"일일 쿼터 한도 초과: {status}")
+                        raise QuotaError(f"일일 쿼터 또는 접근 제한: {status or api_err}")
 
                     if consecutive_fail >= max_consecutive_failures:
+                        if is_quota_error(api_err, status) or len(state["done"]) > 0:
+                            quota_exceeded = True
+                            raise QuotaError(
+                                f"일일 열람 쿼터 또는 사이트 접근 제한에 도달했습니다.\n\n"
+                                + (f"사이트 메시지: {status}\n\n" if status else "")
+                                + "잠시(수 시간~하루) 기다린 후 이어서 수집을 재개할 수 있습니다."
+                            )
                         raise BlockedError(
                             f"연속 {consecutive_fail}회 본문을 가져오지 못해 중단했습니다.\n\n"
                             + (f"사이트 메시지: {status}\n\n" if status else "")

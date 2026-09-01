@@ -338,9 +338,9 @@ class ScraperGUI:
             )
             result["ok"] = True
             result["path"] = path
-        except scrape_novel.QuotaError as e:
+        except (scrape_novel.QuotaError, scrape_novel.BlockedError) as e:
             if self.auto_quota_retry.get() and not self.stop_event.is_set():
-                self._log(f"\n[쿼터 한도 대기] 일일 열람 제한에 도달했습니다: {e}")
+                self._log(f"\n[열람 제한 감지] {e}")
                 self._log("[자동 재시도 모드] 60분 후 자동으로 남아있는 화를 이어서 수집합니다...")
                 import time
                 wait_secs = 3600
@@ -349,10 +349,10 @@ class ScraperGUI:
                         break
                     if s % 300 == 0 or s == wait_secs or s <= 10:
                         mins = s // 60
-                        self.status_var.set(f"쿼터 대기 중… {mins}분 후 재시도")
+                        self.status_var.set(f"재시도 대기 중… {mins}분 후 재시도")
                     time.sleep(1)
                 if not self.stop_event.is_set():
-                    self._log("\n[*] 쿼터 대기 완료. 수집을 재개합니다!")
+                    self._log("\n[*] 대기 완료. 수집을 재개합니다!")
                     return self._run(**params)
             result["error"] = str(e)
             self._log(f"[오류] {e}")
