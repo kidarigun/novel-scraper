@@ -78,6 +78,45 @@ class ExtractBodyTests(unittest.TestCase):
         secs = scrape_novel.seconds_until_midnight(fake_now, target_minute=1)
         self.assertEqual(secs, 120)
 
+    def test_detect_existing_chapters_and_append(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            novel_txt = Path(tmpdir) / "테스트소설.txt"
+            initial_content = (
+                "테스트소설\n출처: https://example.com/novel/100\n총 2화\n\n"
+                + "=" * 60 + "\n1화 시작\n" + "=" * 60 + "\n1화 본문 내용\n\n"
+                + "=" * 60 + "\n2화 전개\n" + "=" * 60 + "\n2화 본문 내용\n\n"
+            )
+            novel_txt.write_text(initial_content, encoding="utf-8")
+
+            online_chapters = [
+                {"episode_id": 1001, "no": 1, "title": "1화 시작", "url": ""},
+                {"episode_id": 1002, "no": 2, "title": "2화 전개", "url": ""},
+                {"episode_id": 1003, "no": 3, "title": "3화 위기", "url": ""},
+            ]
+
+            last_idx, base_content = scrape_novel.detect_existing_chapters(novel_txt, online_chapters)
+            self.assertEqual(last_idx, 2)
+            self.assertEqual(base_content, initial_content)
+
+            # Test merging chapter 3 onto the end
+            ch_dir = Path(tmpdir) / "chapters"
+            ch_dir.mkdir()
+            ch3_text = "\n\n" + "=" * 60 + "\n3화 위기\n" + "=" * 60 + "\n3화 본문 내용\n\n"
+            (ch_dir / "0003_1003.txt").write_text(ch3_text, encoding="utf-8")
+
+            scrape_novel._merge_chapters(
+                novel_txt, "테스트소설", "https://example.com/novel/100", 3,
+                online_chapters, ch_dir, base_content=base_content, existing_count=last_idx, stopped=False
+            )
+
+            updated = novel_txt.read_text(encoding="utf-8")
+            self.assertIn("총 3화", updated)
+            self.assertIn("1화 본문 내용", updated)
+            self.assertIn("2화 본문 내용", updated)
+            self.assertIn("3화 본문 내용", updated)
+
 
 if __name__ == "__main__":
     unittest.main()

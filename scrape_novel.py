@@ -722,15 +722,89 @@ def _save_state(path, state, title=None, url=None, total=None):
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir, stopped=False):
-    """현재까지 수집된 챕터들을 최종 txt 파일로 작성."""
-    with final_path.open("w", encoding="utf-8") as f:
-        f.write(f"{novel_title}\n출처: {url}\n총 {total}화"
-                f"{' (중단됨)' if stopped else ''}\n")
-        for idx, ch in enumerate(chapters, start=1):
+def detect_existing_chapters(final_path, chapters):
+    """
+    기존 txt 파일의 내용을 분석하여 이미 수집된 마지막 챕터 인덱스와 기본 본문 반환.
+    반환값: (last_idx, base_content)
+    - last_idx: 이미 파일에 포함된 챕터 수 (0이면 없음)
+    - base_content: 새로 추가될 챕터 이전의 기존 파일 본문
+    """
+    if not final_path.exists() or final_path.stat().st_size == 0:
+        return 0, ""
+    try:
+        content = final_path.read_text(encoding="utf-8")
+        header_pat = re.compile(r"={50,}\n([^\n]+)\n={50,}\n", re.MULTILINE)
+        matches = list(header_pat.finditer(content))
+        if not matches:
+            return 0, ""
+
+        count = len(matches)
+        last_m = matches[-1]
+        last_title = last_m.group(1).strip()
+
+        matched_idx = None
+        num_m = re.search(r"(?:제\s*)?(\d+)\s*화", last_title) or re.search(r"-\s*(\d+)", last_title)
+        if num_m:
+            target_no = int(num_m.group(1))
+            for i, ch in enumerate(chapters, start=1):
+                if ch.get("no") == target_no:
+                    matched_idx = i
+                    break
+
+        if matched_idx is None:
+            norm_last = _norm(last_title)
+            for i in range(min(count, len(chapters)), 0, -1):
+                ch_title_norm = _norm(chapters[i - 1]["title"])
+                if norm_last in ch_title_norm or ch_title_norm in norm_last:
+                    matched_idx = i
+                    break
+
+        if matched_idx is None:
+            matched_idx = min(count, len(chapters))
+
+        if matched_idx <= len(matches):
+            if matched_idx < len(matches):
+                cutoff_pos = matches[matched_idx].start()
+                base_content = content[:cutoff_pos]
+            else:
+                base_content = content
+        else:
+            base_content = content
+
+        return matched_idx, base_content
+    except Exception:  # noqa: BLE001
+        return 0, ""
+
+
+def _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir,
+                    base_content="", existing_count=0, stopped=False):
+    """현재까지 수집된 챕터들을 최종 txt 파일로 작성/갱신."""
+    if existing_count > 0 and base_content:
+        content = base_content
+        new_header_line = f"총 {total}화{' (중단됨)' if stopped else ''}"
+        content = re.sub(r"^총\s*\d+화.*$", new_header_line, content, count=1, flags=re.MULTILINE)
+
+        new_parts = []
+        for idx in range(existing_count + 1, len(chapters) + 1):
+            ch = chapters[idx - 1]
             ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
             if ch_file.exists():
-                f.write(ch_file.read_text(encoding="utf-8"))
+                new_parts.append(ch_file.read_text(encoding="utf-8"))
+
+        if new_parts:
+            if not content.endswith("\n"):
+                content += "\n"
+            content += "".join(new_parts)
+
+        final_path.write_text(content, encoding="utf-8")
+    else:
+        with final_path.open("w", encoding="utf-8") as f:
+            f.write(f"{novel_title}\n출처: {url}\n총 {total}화"
+                    f"{' (중단됨)' if stopped else ''}\n")
+            for idx, ch in enumerate(chapters, start=1):
+                ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
+                if ch_file.exists():
+                    f.write(ch_file.read_text(encoding="utf-8"))
 
 
 def _safe_filename(name):
@@ -792,7 +866,24 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
 
         total = len(chapters)
         _save_state(state_path, state, title=novel_title, url=url, total=total)
-        _recover_from_txt_if_needed(final_path, url, chapters, chapters_dir, state, state_path, log=log)
+
+        existing_count, base_content = detect_existing_chapters(final_path, chapters)
+        if existing_count > 0:
+            log(f"[*] 기존 파일({final_path.name}) 분석: {existing_count}화까지 이미 포함되어 있음을 확인했습니다.")
+            for i in range(1, existing_count + 1):
+                ch = chapters[i - 1]
+                key = str(ch["episode_id"])
+                if key not in state["done"]:
+                    state["done"][key] = {"idx": i, "title": ch["title"], "chars": 0}
+            _save_state(state_path, state, title=novel_title, url=url, total=total)
+            if existing_count >= total:
+                log(f"[*] 이미 최신 연재분까지 모두 수집되어 있습니다. (총 {total}화)")
+                return str(final_path)
+            else:
+                log(f"[*] 최신 추가 연재분 ({existing_count + 1}화 ~ {total}화)부터 이어서 수집합니다.")
+        else:
+            _recover_from_txt_if_needed(final_path, url, chapters, chapters_dir, state, state_path, log=log)
+
         log(f"[*] 소설: {novel_title}  /  총 {total}화  (완료 {len(state['done'])})")
         if on_progress:
             on_progress(len(state["done"]), total)
@@ -884,7 +975,8 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
 
                 # 실시간 중간 병합 (5화마다 진행)
                 if idx % 5 == 0:
-                    _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir, stopped=True)
+                    _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir,
+                                    base_content=base_content, existing_count=existing_count, stopped=True)
 
                 if on_progress:
                     on_progress(idx, total)
@@ -910,7 +1002,8 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
 
     # 최종 병합 (수집된 챕터까지)
     log(f"[*] 병합 -> {final_path}")
-    _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir, stopped=stopped)
+    _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir,
+                    base_content=base_content, existing_count=existing_count, stopped=stopped)
     log(f"[완료] {final_path} ({final_path.stat().st_size:,} bytes)")
     if quota_exceeded:
         raise QuotaError(blocked_msg or "일일 열람 쿼터 초과")
