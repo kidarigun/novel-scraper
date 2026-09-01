@@ -27,6 +27,7 @@ if getattr(sys, "frozen", False) and not os.environ.get("PLAYWRIGHT_BROWSERS_PAT
 
 import tkinter as tk  # noqa: E402
 from tkinter import filedialog, messagebox, ttk  # noqa: E402
+import tkinter.font as tkfont  # noqa: E402
 
 
 def _startup_fail(exc):
@@ -99,14 +100,25 @@ class ScraperGUI:
     def __init__(self, root):
         self.root = root
         root.title("연재 소설 스크래퍼")
-        root.geometry("720x560")
-        root.minsize(640, 480)
+        root.geometry("1020x760")
+        root.minsize(880, 600)
+
+        # 텍스트 크기 1.5배 확대 (기본 9pt -> 14pt)
+        for font_name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                tkfont.nametofont(font_name).configure(size=14, family="맑은 고딕")
+            except Exception:
+                pass
+
+        self.style = ttk.Style()
+        self.style.configure(".", font=("맑은 고딕", 14))
+        self.style.configure("TLabelframe.Label", font=("맑은 고딕", 14, "bold"))
 
         self.log_q = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = None
 
-        pad = {"padx": 10, "pady": 4}
+        pad = {"padx": 12, "pady": 6}
         frm = ttk.Frame(root)
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
@@ -138,62 +150,63 @@ class ScraperGUI:
 
         # 옵션들
         opt = ttk.LabelFrame(frm, text="옵션")
-        opt.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=8)
+        opt.grid(row=3, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
         for c in range(6):
             opt.columnconfigure(c, weight=1)
 
-        ttk.Label(opt, text="최소 지연(초)").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(opt, text="최소 지연(초)").grid(row=0, column=0, sticky="w", padx=8, pady=6)
         self.min_delay = tk.DoubleVar(value=15.0)
-        ttk.Spinbox(opt, from_=0, to=60, increment=1, width=6,
-                    textvariable=self.min_delay).grid(row=0, column=1, sticky="w")
+        ttk.Spinbox(opt, from_=0, to=60, increment=1, width=7,
+                    textvariable=self.min_delay).grid(row=0, column=1, sticky="w", padx=4)
 
-        ttk.Label(opt, text="최대 지연(초)").grid(row=0, column=2, sticky="w", padx=6)
+        ttk.Label(opt, text="최대 지연(초)").grid(row=0, column=2, sticky="w", padx=8)
         self.max_delay = tk.DoubleVar(value=20.0)
-        ttk.Spinbox(opt, from_=0, to=120, increment=1, width=6,
-                    textvariable=self.max_delay).grid(row=0, column=3, sticky="w")
+        ttk.Spinbox(opt, from_=0, to=120, increment=1, width=7,
+                    textvariable=self.max_delay).grid(row=0, column=3, sticky="w", padx=4)
 
-        ttk.Label(opt, text="개수 제한(0=전체)").grid(row=0, column=4, sticky="w", padx=6)
+        ttk.Label(opt, text="개수 제한(0=전체)").grid(row=0, column=4, sticky="w", padx=8)
         self.limit = tk.IntVar(value=0)
-        ttk.Spinbox(opt, from_=0, to=100000, increment=1, width=8,
-                    textvariable=self.limit).grid(row=0, column=5, sticky="w")
+        ttk.Spinbox(opt, from_=0, to=100000, increment=1, width=9,
+                    textvariable=self.limit).grid(row=0, column=5, sticky="w", padx=4)
 
-        ttk.Label(opt, text="프록시(선택)").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(opt, text="프록시(선택)").grid(row=1, column=0, sticky="w", padx=8, pady=6)
         self.proxy = tk.StringVar(value="")
         ttk.Entry(opt, textvariable=self.proxy).grid(
             row=1, column=1, columnspan=2, sticky="ew", padx=6)
 
         self.headful = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="창 표시", variable=self.headful).grid(
-            row=1, column=3, sticky="w", padx=6)
+            row=1, column=3, sticky="w", padx=8)
         self.solve_cf = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="CF 우회", variable=self.solve_cf).grid(
-            row=1, column=4, sticky="w", padx=6)
+            row=1, column=4, sticky="w", padx=8)
         self.auto_quota_retry = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="쿼터시 자정(0시)후 자동재시도", variable=self.auto_quota_retry).grid(
-            row=1, column=5, sticky="w", padx=6)
+            row=1, column=5, sticky="w", padx=8)
 
         # 버튼
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=3, sticky="ew", padx=10)
+        btns.grid(row=4, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.start_btn = ttk.Button(btns, text="시작", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text="중지", command=self.stop, state="disabled")
-        self.stop_btn.pack(side="left", padx=6)
+        self.stop_btn.pack(side="left", padx=8)
         self.install_btn = ttk.Button(btns, text="브라우저 설치",
                                       command=self.install_browser_click)
         self.install_btn.pack(side="left")
-        ttk.Button(btns, text="로그 지우기", command=self.clear_log).pack(side="left", padx=6)
+        ttk.Button(btns, text="로그 지우기", command=self.clear_log).pack(side="left", padx=8)
 
         # 진행률
         self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", padx=10, pady=6)
+        self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.status_var = tk.StringVar(value="대기 중")
         ttk.Label(frm, textvariable=self.status_var).grid(
-            row=6, column=0, columnspan=3, sticky="w", padx=10)
+            row=6, column=0, columnspan=3, sticky="w", padx=12)
 
         # 로그
-        self.log_txt = tk.Text(frm, height=13, wrap="word", state="disabled")
-        self.log_txt.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=10, pady=8)
+        self.log_txt = tk.Text(frm, height=13, wrap="word", state="disabled",
+                               font=("Consolas", 13))
+        self.log_txt.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
         frm.rowconfigure(7, weight=1)
         sb = ttk.Scrollbar(frm, command=self.log_txt.yview)
         sb.grid(row=7, column=3, sticky="ns", pady=8)
