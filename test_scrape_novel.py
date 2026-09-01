@@ -117,6 +117,16 @@ class ExtractBodyTests(unittest.TestCase):
             self.assertIn("2화 본문 내용", updated)
             self.assertIn("3화 본문 내용", updated)
 
+    def test_gui_module_and_initialization(self):
+        import tkinter as tk
+        import gui
+        r = tk.Tk()
+        try:
+            app = gui.ScraperGUI(r)
+            app.refresh_history_list()
+        finally:
+            r.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
