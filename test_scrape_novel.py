@@ -65,6 +65,13 @@ class ExtractBodyTests(unittest.TestCase):
         err = scrape_novel.QuotaError("쿼터 초과")
         self.assertIsInstance(err, Exception)
 
+    def test_safe_filename_removes_newlines_and_special_chars(self):
+        dirty_title = "회귀한 만년 부장은 재벌로 인생역전\n판타지, 현대\r\n"
+        safe = scrape_novel._safe_filename(dirty_title)
+        self.assertNotIn("\n", safe)
+        self.assertNotIn("\r", safe)
+        self.assertEqual(safe, "회귀한 만년 부장은 재벌로 인생역전 판타지, 현대")
+
 
 if __name__ == "__main__":
     unittest.main()

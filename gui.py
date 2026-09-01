@@ -207,9 +207,10 @@ class ScraperGUI:
         self.cached_novels_map.clear()
         display_list = []
         for n in novels:
+            clean_title = re.sub(r"[\r\n\t\s]+", " ", n.get('title') or "").strip()
             total_str = f"{n['total']}" if n['total'] else "?"
             pct = f" ({int(n['done_count']/n['total']*100)}%)" if n['total'] else ""
-            label = f"{n['title']} [{n['done_count']}/{total_str}화 완료]{pct}"
+            label = f"{clean_title} [{n['done_count']}/{total_str}화 완료]{pct}"
             self.cached_novels_map[label] = n
             display_list.append(label)
         self.history_cb["values"] = display_list
@@ -223,8 +224,8 @@ class ScraperGUI:
             self.url_var.set(item["url"])
             safe_name = scrape_novel._safe_filename(item["title"])
             out_file = str(self._default_downloads() / f"{safe_name}.txt")
-            if not self.out_var.get() or "소설.txt" in self.out_var.get():
-                self.out_var.set(out_file)
+            out_file = re.sub(r"[\r\n\t]+", "", out_file)
+            self.out_var.set(out_file)
 
     def load_history_click(self):
         label = self.history_var.get()

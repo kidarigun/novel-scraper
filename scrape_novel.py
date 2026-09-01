@@ -310,15 +310,15 @@ EXTRACT_JS = r"""
   };
 
   const tick = async () => {
-    let candidate = extract();
+    let candidate = await tryDirectApiDecrypt();
     if (!candidate) {
-      candidate = await tryDirectApiDecrypt();
+      candidate = extract();
     }
     if ((candidate && candidate.text.length >= MIN_LENGTH) || Date.now() - start > maxMs) {
       finish(candidate, Date.now() - start > maxMs);
       return;
     }
-    setTimeout(tick, 400);
+    setTimeout(tick, 200);
   };
   tick();
 })
@@ -365,13 +365,13 @@ def make_body_action(max_ms):
     return act
 
 
-def _fetch(session, url, *, page_action, wait_selector, solve_cf):
-    return session.fetch(url, network_idle=True, wait_selector=wait_selector,
+def _fetch(session, url, *, page_action, wait_selector, solve_cf, network_idle=False):
+    return session.fetch(url, network_idle=network_idle, wait_selector=wait_selector,
                          page_action=page_action, solve_cloudflare=solve_cf)
 
 
 def fetch_with_retry(session, url, *, page_action=None, wait_selector=None,
-                     solve_cf=False, max_retries=4, base_backoff=8.0,
+                     solve_cf=False, network_idle=False, max_retries=4, base_backoff=8.0,
                      log=print, should_stop=None):
     last_err = None
     for attempt in range(1, max_retries + 1):
@@ -379,7 +379,8 @@ def fetch_with_retry(session, url, *, page_action=None, wait_selector=None,
             raise StopScrape()
         try:
             page = _fetch(session, url, page_action=page_action,
-                          wait_selector=wait_selector, solve_cf=solve_cf)
+                          wait_selector=wait_selector, solve_cf=solve_cf,
+                          network_idle=network_idle)
             status = getattr(page, "status", 200)
             if status and status >= 400:
                 raise RuntimeError(f"HTTP {status}")
@@ -440,6 +441,9 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
             t_el = page.css(".page-title") or page.css("title")
             if t_el:
                 raw_t = t_el[0].get_all_text().strip()
+                lines = [line.strip() for line in raw_t.splitlines() if line.strip()]
+                if lines:
+                    raw_t = lines[0]
                 raw_t = re.sub(r"\s*-\s*뉴토끼.*$", "", raw_t)
                 raw_t = re.sub(r"\s*완결소설.*$", "", raw_t)
                 raw_t = re.sub(r"\s+", " ", raw_t).strip()
@@ -620,7 +624,8 @@ def _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir,
 
 
 def _safe_filename(name):
-    return re.sub(r'[\\/:*?"<>|]', "_", name).strip()[:100] or "novel"
+    cleaned = re.sub(r"[\r\n\t\s]+", " ", name or "").strip()
+    return re.sub(r'[\\/:*?"<>|]', "_", cleaned).strip()[:100] or "novel"
 
 
 def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
@@ -664,7 +669,8 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
 
         # 출력 경로 결정
         if out_path:
-            final_path = Path(out_path)
+            cleaned_out = re.sub(r"[\r\n\t]+", "", str(out_path)).strip()
+            final_path = Path(cleaned_out)
         else:
             base = Path(out_dir) if out_dir else Path(__file__).resolve().parent
             final_path = base / f"{_safe_filename(novel_title)}.txt"
