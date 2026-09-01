@@ -17,6 +17,7 @@ IP 차단 회피: 단일 세션 재사용 / 랜덤 지연 / 주기적 휴식 / �
 """
 
 import argparse
+import datetime
 import json
 import random
 import re
@@ -596,6 +597,17 @@ def is_quota_error(api_err, status=""):
     combined = f"{api_err or ''} {status or ''}".lower()
     quota_terms = ["quota", "captcha", "limit", "429", "쿼터", "한도", "인증", "열람", "차단", "잠시"]
     return any(term in combined for term in quota_terms)
+
+
+def seconds_until_midnight(now=None, target_minute=1, target_second=0):
+    """자정(00시 + target_minute분) 리셋 시점까지 남은 초 계산."""
+    if now is None:
+        now = datetime.datetime.now()
+    target = (now + datetime.timedelta(days=1)).replace(
+        hour=0, minute=target_minute, second=target_second, microsecond=0
+    )
+    secs = int((target - now).total_seconds())
+    return max(60, secs)
 
 
 def make_file_logger(log_func, *log_files):

@@ -168,7 +168,7 @@ class ScraperGUI:
         ttk.Checkbutton(opt, text="CF 우회", variable=self.solve_cf).grid(
             row=1, column=4, sticky="w", padx=6)
         self.auto_quota_retry = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt, text="쿼터시 1시간후 자동재시도", variable=self.auto_quota_retry).grid(
+        ttk.Checkbutton(opt, text="쿼터시 자정(0시)후 자동재시도", variable=self.auto_quota_retry).grid(
             row=1, column=5, sticky="w", padx=6)
 
         # 버튼
@@ -340,19 +340,24 @@ class ScraperGUI:
             result["path"] = path
         except (scrape_novel.QuotaError, scrape_novel.BlockedError) as e:
             if self.auto_quota_retry.get() and not self.stop_event.is_set():
-                self._log(f"\n[열람 제한 감지] {e}")
-                self._log("[자동 재시도 모드] 60분 후 자동으로 남아있는 화를 이어서 수집합니다...")
                 import time
-                wait_secs = 3600
+                wait_secs = scrape_novel.seconds_until_midnight(target_minute=1)
+                h = wait_secs // 3600
+                m = (wait_secs % 3600) // 60
+                time_desc = f"{h}시간 {m}분" if h > 0 else f"{m}분"
+                self._log(f"\n[열람 제한 감지] {e}")
+                self._log(f"[자동 재시도 모드] 일일 쿼터 리셋 시점(자정 00:01)까지 대기합니다. (약 {time_desc} 후 재개)")
                 for s in range(wait_secs, 0, -1):
                     if self.stop_event.is_set():
                         break
-                    if s % 300 == 0 or s == wait_secs or s <= 10:
-                        mins = s // 60
-                        self.status_var.set(f"재시도 대기 중… {mins}분 후 재시도")
+                    if s % 60 == 0 or s == wait_secs or s <= 10:
+                        cur_h = s // 3600
+                        cur_m = (s % 3600) // 60
+                        rem_str = f"{cur_h}시간 {cur_m}분" if cur_h > 0 else f"{cur_m}분 {s % 60}초"
+                        self.status_var.set(f"자정 쿼터 리셋 대기 중… {rem_str} 후 재시도 (00:01)")
                     time.sleep(1)
                 if not self.stop_event.is_set():
-                    self._log("\n[*] 대기 완료. 수집을 재개합니다!")
+                    self._log("\n[*] 자정 쿼터 리셋 대기 완료. 수집을 재개합니다!")
                     return self._run(**params)
             result["error"] = str(e)
             self._log(f"[오류] {e}")

@@ -72,6 +72,12 @@ class ExtractBodyTests(unittest.TestCase):
         self.assertNotIn("\r", safe)
         self.assertEqual(safe, "회귀한 만년 부장은 재벌로 인생역전 판타지, 현대")
 
+    def test_seconds_until_midnight(self):
+        import datetime
+        fake_now = datetime.datetime(2026, 9, 2, 23, 59, 0)
+        secs = scrape_novel.seconds_until_midnight(fake_now, target_minute=1)
+        self.assertEqual(secs, 120)
+
 
 if __name__ == "__main__":
     unittest.main()
