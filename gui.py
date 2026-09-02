@@ -11,6 +11,7 @@
 실행:  python gui.py
 """
 
+import json
 import os
 import queue
 import re
@@ -136,9 +137,11 @@ class ScraperGUI:
         # URL
         ttk.Label(frm, text="소설 목록 URL").grid(row=1, column=0, sticky="w", **pad)
         self.url_var = tk.StringVar()
-        url_entry = ttk.Entry(frm, textvariable=self.url_var)
-        url_entry.grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
-        url_entry.focus()
+        self.url_entry = ttk.Entry(frm, textvariable=self.url_var)
+        self.url_entry.grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
+        self.url_entry.focus()
+        self.url_entry.bind("<FocusOut>", self._on_url_entry_event)
+        self.url_entry.bind("<Return>", self._on_url_entry_event)
 
         # 출력 파일
         ttk.Label(frm, text="저장 파일").grid(row=2, column=0, sticky="w", **pad)
@@ -184,6 +187,13 @@ class ScraperGUI:
         ttk.Checkbutton(opt, text="쿼터시 자정(0시)후 자동재시도", variable=self.auto_quota_retry).grid(
             row=1, column=5, sticky="w", padx=8)
 
+        self.auto_clipboard = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt, text="클립보드 URL 자동 감지 및 파일명 설정", variable=self.auto_clipboard).grid(
+            row=2, column=0, columnspan=3, sticky="w", padx=8, pady=4)
+        self.auto_start_on_clipboard = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt, text="감지 시 즉시 스크랩 시작", variable=self.auto_start_on_clipboard).grid(
+            row=2, column=3, columnspan=3, sticky="w", padx=8, pady=4)
+
         # 버튼
         btns = ttk.Frame(frm)
         btns.grid(row=4, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
@@ -212,9 +222,11 @@ class ScraperGUI:
         sb.grid(row=7, column=3, sticky="ns", pady=8)
         self.log_txt["yscrollcommand"] = sb.set
 
+        self._last_clipboard = ""
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_history_list()
         self.root.after(100, self._drain_queue)
+        self.root.after(600, self._check_clipboard)
 
     def refresh_history_list(self):
         novels = scrape_novel.get_cached_novels()
@@ -287,6 +299,17 @@ class ScraperGUI:
                     self.log_txt.insert("end", data + "\n")
                     self.log_txt.see("end")
                     self.log_txt["state"] = "disabled"
+                elif kind == "detected_title":
+                    url, title = data
+                    if self.url_var.get() == url:
+                        safe_name = scrape_novel._safe_filename(title)
+                        out_file = str(self._default_downloads() / f"{safe_name}.txt")
+                        out_file = re.sub(r"[\r\n\t]+", "", out_file)
+                        self.out_var.set(out_file)
+                        self.status_var.set("대기 중")
+                        self._log(f"[*] 소설 제목 확인: {title} -> 저장 파일: {safe_name}.txt")
+                        if self.auto_start_on_clipboard.get() and not (self.worker and self.worker.is_alive()):
+                            self.start()
                 elif kind == "progress":
                     done, total = data
                     self.progress["maximum"] = max(total, 1)
@@ -306,6 +329,58 @@ class ScraperGUI:
         except queue.Empty:
             pass
         self.root.after(100, self._drain_queue)
+
+    def _on_url_entry_event(self, event=None):
+        url = self.url_var.get().strip()
+        if url and "/novel/" in url:
+            self._update_title_and_filename(url, auto_start=False)
+
+    def _check_clipboard(self):
+        if self.auto_clipboard.get() and not (self.worker and self.worker.is_alive()):
+            try:
+                clip = self.root.clipboard_get().strip()
+                if clip and clip != self._last_clipboard:
+                    self._last_clipboard = clip
+                    m = re.search(r"https?://[^\s]+/novel/\d+[^\s]*", clip)
+                    if m:
+                        detected_url = m.group(0)
+                        if detected_url != self.url_var.get():
+                            self._on_new_url_detected(detected_url)
+            except Exception:
+                pass
+        self.root.after(700, self._check_clipboard)
+
+    def _on_new_url_detected(self, url):
+        self.url_var.set(url)
+        self._log(f"\n[클립보드 감지] 소설 URL 자동 입력: {url}")
+        self._update_title_and_filename(url, auto_start=self.auto_start_on_clipboard.get())
+
+    def _update_title_and_filename(self, url, auto_start=False):
+        cached_title = None
+        try:
+            novel_id = scrape_novel.parse_novel_id(url)
+            cache_dir = scrape_novel.CACHE_ROOT / novel_id
+            state_file = cache_dir / "state.json"
+            if state_file.exists():
+                data = json.loads(state_file.read_text(encoding="utf-8"))
+                cached_title = data.get("title")
+        except Exception:
+            pass
+
+        if cached_title:
+            safe_name = scrape_novel._safe_filename(cached_title)
+            out_file = str(self._default_downloads() / f"{safe_name}.txt")
+            out_file = re.sub(r"[\r\n\t]+", "", out_file)
+            self.out_var.set(out_file)
+            self._log(f"[*] 소설 제목 확인(이력): {cached_title} -> 저장 파일: {safe_name}.txt")
+            if auto_start and not (self.worker and self.worker.is_alive()):
+                self.start()
+        else:
+            self.status_var.set("소설 제목 확인 중…")
+            def _fetch_title():
+                title = scrape_novel.quick_fetch_novel_title(url)
+                self.log_q.put(("detected_title", (url, title)))
+            threading.Thread(target=_fetch_title, daemon=True).start()
 
     # ---- run control ----
     def start(self):

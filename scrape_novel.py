@@ -642,6 +642,49 @@ def derive_novel_title(chapters, fallback, detected_title=None):
     return detected_title or fallback
 
 
+def quick_fetch_novel_title(url):
+    """소설 목록 페이지에서 가볍게 제목만 빠르게 파싱 (브라우저 기동 없이 0.5~1초 이내)."""
+    try:
+        from curl_cffi import requests
+        r = requests.get(url, impersonate="chrome124", timeout=7)
+        if r.status_code == 200:
+            html = r.text
+            # 1. og:title
+            m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html)
+            if m:
+                t = m.group(1).strip()
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼).*$", "", t)
+                t = re.sub(r"\s*완결소설.*$", "", t)
+                t = re.sub(r"\s+", " ", t).strip()
+                if t:
+                    return t
+            # 2. .page-title
+            m = re.search(r'class=["\'][^"\']*page-title[^"\']*["\'][^>]*>(.*?)<', html)
+            if m:
+                t = m.group(1).strip()
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼).*$", "", t)
+                t = re.sub(r"\s*완결소설.*$", "", t)
+                t = re.sub(r"\s+", " ", t).strip()
+                if t:
+                    return t
+            # 3. <title>
+            m = re.search(r'<title>([^<]+)</title>', html)
+            if m:
+                t = m.group(1).strip()
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼).*$", "", t)
+                t = re.sub(r"\s*완결소설.*$", "", t)
+                t = re.sub(r"\s+", " ", t).strip()
+                if t:
+                    return t
+    except Exception:
+        pass
+    try:
+        novel_id = parse_novel_id(url)
+        return f"소설_{novel_id}"
+    except Exception:
+        return "소설"
+
+
 def is_quota_error(api_err, status=""):
     combined = f"{api_err or ''} {status or ''}".lower()
     quota_terms = ["quota", "captcha", "limit", "429", "쿼터", "한도", "인증", "열람", "차단", "잠시"]

@@ -155,6 +155,11 @@ class ExtractBodyTests(unittest.TestCase):
         self.assertEqual(items[3]["no"], 24)
         self.assertEqual(items[4]["no"], 25)
 
+    def test_quick_fetch_novel_title_fallback(self):
+        # 유효하지 않은 네트워크 상황에서도 최소 소설_{id} 형태로 반환하는지 검증
+        title = scrape_novel.quick_fetch_novel_title("https://invalid-non-existent-domain.xyz/novel/99999")
+        self.assertEqual(title, "소설_99999")
+
 
 if __name__ == "__main__":
     unittest.main()
