@@ -1,3 +1,4 @@
+import re
 import unittest
 
 import scrape_novel
@@ -126,6 +127,33 @@ class ExtractBodyTests(unittest.TestCase):
             app.refresh_history_list()
         finally:
             r.destroy()
+
+    def test_chapter_sort_key_with_prologue_and_numbers(self):
+        # 4페이지 역순으로 수집된 챕터들이 1화부터 오름차순으로 정렬되는지 검증
+        items = [
+            {"episode_id": 8638489, "no": 25, "title": "25화"},
+            {"episode_id": 8638488, "no": 24, "title": "24화"},
+            {"episode_id": 8638466, "no": 2, "title": "2화"},
+            {"episode_id": 8638465, "no": 1, "title": "1화"},
+            {"episode_id": 8638464, "no": None, "title": "프롤로그"},
+        ]
+
+        def _sort_key(it):
+            no = it.get("no")
+            eid = it.get("episode_id", 0)
+            if no is not None:
+                return (0, no, eid)
+            title = it.get("title", "")
+            if re.search(r"프롤로그|prologue", title, re.I):
+                return (0, 0, eid)
+            return (1, eid, eid)
+
+        items.sort(key=_sort_key)
+        self.assertEqual(items[0]["title"], "프롤로그")
+        self.assertEqual(items[1]["no"], 1)
+        self.assertEqual(items[2]["no"], 2)
+        self.assertEqual(items[3]["no"], 24)
+        self.assertEqual(items[4]["no"], 25)
 
 
 if __name__ == "__main__":

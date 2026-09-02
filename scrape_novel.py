@@ -23,6 +23,7 @@ import random
 import re
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 try:  # 콘솔 한글 깨짐 방지
@@ -438,13 +439,33 @@ def _interruptible_sleep(secs, should_stop):
 
 def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should_stop=None):
     """소설 목록 페이지(모든 페이징 포함)에서 챕터 목록을 수집."""
+    _log = log or (lambda m: None)
     novel_id = parse_novel_id(list_url)
     base = re.match(r"(https?://[^/]+)", list_url).group(1)
+    base_novel_url = f"{base}/novel/{novel_id}"
     href_pat = re.compile(rf"/novel/{novel_id}/(\d+)")
-    page_pat = re.compile(rf"/novel/{novel_id}\?(?:epage|spage|p|page)=(\d+)")
+    page_param_pat = re.compile(r"[?&](epage|spage|p|page)=(\d+)")
 
     visited_pages = set()
-    pending_pages = [list_url]
+    pending_pages = []
+
+    # 1. URL 끝에 페이지 파라미터가 포함되어 있는 경우 (예: ?epage=4)
+    # 내림차순 정렬된 목록의 마지막 페이지가 입력된 경우, 해당 페이지부터 1페이지까지 역순으로 큐 생성
+    m_param = page_param_pat.search(list_url)
+    if m_param:
+        param_name = m_param.group(1)
+        max_page = int(m_param.group(2))
+        _log(f"[*] 입력 URL에서 목록 페이지({param_name}={max_page}) 감지.")
+        _log(f"[*] 1페이지까지 총 {max_page}개 목록 페이지를 역순으로 모두 수집합니다.")
+        for p in range(max_page, 0, -1):
+            p_url = f"{base_novel_url}?{param_name}={p}"
+            if p_url not in pending_pages:
+                pending_pages.append(p_url)
+        if base_novel_url not in pending_pages:
+            pending_pages.append(base_novel_url)
+    else:
+        pending_pages.append(list_url)
+
     items, seen_eids = [], set()
 
     if hasattr(session_or_page, "css"):
@@ -465,7 +486,7 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
             if should_stop and should_stop():
                 raise StopScrape()
             page = fetch_with_retry(session_or_page, page_url, solve_cf=solve_cf,
-                                  log=log or (lambda m: None), should_stop=should_stop)
+                                    log=_log, should_stop=should_stop)
 
         visited_pages.add(page_url)
 
@@ -492,27 +513,55 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
                 continue
             seen_eids.add(eid)
             title = re.sub(r"\s+", " ", (a.get_all_text() or "").strip())
-            full_url = href if href.startswith("http") else base + href
-            num_m = re.search(r"-\s*(\d+)", title) or re.search(r"(\d+)\s*화", title)
+            full_url = urllib.parse.urljoin(page_url, href)
+            num_m = re.search(r"(?:제\s*)?(\d+)\s*화", title) or re.search(r"-\s*(\d+)", title)
             items.append({"episode_id": int(eid),
                           "no": int(num_m.group(1)) if num_m else None,
                           "title": title, "url": full_url})
 
+        # 아직 방문하지 않은 다른 페이징 링크가 HTML 내에 있다면 동적 추가
         if not hasattr(session_or_page, "css"):
+            max_discovered_page = 0
+            discovered_param = "epage"
             for a in page.css("a"):
                 href = a.attrib.get("href", "") if a.attrib else ""
-                if page_pat.search(href) or "epage=" in href or "spage=" in href:
-                    full_page_url = href if href.startswith("http") else base + href
+                if not href:
+                    continue
+                full_page_url = urllib.parse.urljoin(page_url, href)
+                m_pg = page_param_pat.search(href)
+                if m_pg and f"/novel/{novel_id}" in full_page_url:
+                    discovered_param = m_pg.group(1)
+                    pg_num = int(m_pg.group(2))
+                    if pg_num > max_discovered_page:
+                        max_discovered_page = pg_num
                     if full_page_url not in visited_pages and full_page_url not in pending_pages:
                         pending_pages.append(full_page_url)
+                elif href in (f"/novel/{novel_id}", f"{base}/novel/{novel_id}"):
+                    if full_page_url not in visited_pages and full_page_url not in pending_pages:
+                        pending_pages.append(full_page_url)
+
+            # 새롭게 발견된 최대 페이지 번호까지 큐 보충
+            if max_discovered_page > 1:
+                for p in range(max_discovered_page, 0, -1):
+                    p_url = f"{base_novel_url}?{discovered_param}={p}"
+                    if p_url not in visited_pages and p_url not in pending_pages:
+                        pending_pages.append(p_url)
 
     if not items:
         raise ValueError("챕터 링크를 찾지 못했습니다. URL을 확인하세요.")
 
-    if all(it["no"] is not None for it in items):
-        items.sort(key=lambda it: it["no"])
-    else:
-        items.sort(key=lambda it: it["episode_id"])
+    # 챕터 순서 정렬: 회차 번호가 있으면 회차 번호 오름차순(1화, 2화, ...), 프롤로그는 0, 미표기 시 episode_id 오름차순
+    def _chapter_sort_key(it):
+        no = it.get("no")
+        eid = it.get("episode_id", 0)
+        if no is not None:
+            return (0, no, eid)
+        title = it.get("title", "")
+        if re.search(r"프롤로그|prologue", title, re.IGNORECASE):
+            return (0, 0, eid)
+        return (1, eid, eid)
+
+    items.sort(key=_chapter_sort_key)
     return items, detected_title
 
 
