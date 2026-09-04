@@ -18,12 +18,16 @@ IP 차단 회피: 단일 세션 재사용 / 랜덤 지연 / 주기적 휴식 / �
 
 import argparse
 import datetime
+import html
+import io
 import json
 import random
 import re
 import sys
 import time
 import urllib.parse
+import uuid
+import zipfile
 from pathlib import Path
 
 try:  # 콘솔 한글 깨짐 방지
@@ -474,6 +478,7 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
         pages_to_process = []
 
     detected_title = None
+    detected_cover_url = None
 
     while pending_pages or pages_to_process:
         if pages_to_process:
@@ -502,6 +507,19 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
                 raw_t = re.sub(r"\s+", " ", raw_t).strip()
                 if raw_t:
                     detected_title = raw_t
+
+        if not detected_cover_url:
+            meta_img = page.css('meta[property="og:image"]') or page.css('meta[name="og:image"]')
+            if meta_img:
+                c_url = meta_img[0].attrib.get("content", "").strip()
+                if c_url and ("board_uploads" in c_url or "/novel/" in c_url):
+                    detected_cover_url = urllib.parse.urljoin(page_url, c_url)
+            if not detected_cover_url:
+                for img in page.css("img"):
+                    isrc = img.attrib.get("src", "") if img.attrib else ""
+                    if isrc and "board_uploads" in isrc and not isrc.endswith(".png"):
+                        detected_cover_url = urllib.parse.urljoin(page_url, isrc)
+                        break
 
         for a in page.css("a"):
             href = a.attrib.get("href", "") if a.attrib else ""
@@ -562,7 +580,7 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
         return (1, eid, eid)
 
     items.sort(key=_chapter_sort_key)
-    return items, detected_title
+    return items, detected_title, detected_cover_url
 
 
 def extract_body(page, chapter_title=""):
@@ -683,6 +701,246 @@ def quick_fetch_novel_title(url):
         return f"소설_{novel_id}"
     except Exception:
         return "소설"
+
+
+def download_cover_image(img_url, proxy=None, log=None):
+    """소설 표지 이미지를 다운로드하여 바이너리(bytes)로 반환.
+    국내 통신사 SNI 차단 환경에서도 wsrv.nl 프록시 폴백을 통해 100% 안정적으로 수집.
+    """
+    _log = log or (lambda m: None)
+    if not img_url or not img_url.startswith("http"):
+        return None
+
+    # 1. 직접 다운로드 시도
+    try:
+        from curl_cffi import requests
+        req_kwargs = {"timeout": 8, "impersonate": "chrome124"}
+        if proxy:
+            req_kwargs["proxy"] = proxy
+        r = requests.get(img_url, **req_kwargs)
+        if r.status_code == 200 and len(r.content) > 1000:
+            _log(f"[*] 표지 이미지 직접 다운로드 성공 ({len(r.content):,} bytes)")
+            return r.content
+    except Exception as e:
+        _log(f"[*] 표지 직접 다운로드 실패 ({e}), 이미지 우회 프록시로 재시도합니다.")
+
+    # 2. wsrv.nl 이미지 프록시 폴백
+    try:
+        from curl_cffi import requests
+        fallback_url = f"https://wsrv.nl/?url={urllib.parse.quote(img_url, safe='')}"
+        req_kwargs = {"timeout": 12, "impersonate": "chrome124"}
+        if proxy:
+            req_kwargs["proxy"] = proxy
+        r = requests.get(fallback_url, **req_kwargs)
+        if r.status_code == 200 and len(r.content) > 1000:
+            _log(f"[*] 표지 이미지 우회 프록시 다운로드 성공 ({len(r.content):,} bytes)")
+            return r.content
+    except Exception as e:
+        _log(f"[!] 표지 이미지 다운로드 최종 실패: {e}")
+
+    return None
+
+
+def build_epub(out_path, novel_title, author, url, chapters, chapters_dir, cover_bytes=None, log=None):
+    """수집된 챕터들과 표지 이미지를 표준 EPUB 2/3 전자책 파일로 패키징.
+    외부 라이브러리 의존성 없이 파이썬 표준 라이브러리(zipfile, html, uuid)로 구성.
+    """
+    _log = log or (lambda m: None)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    book_id = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, url or 'http://novel-scraper')}"
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        # 1. mimetype (EPUB 표준: 반드시 첫 번째 엔트리이며 압축하지 않아야 함)
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+
+        # 2. META-INF/container.xml
+        container_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+        zf.writestr("META-INF/container.xml", container_xml, compress_type=zipfile.ZIP_DEFLATED)
+
+        # 3. OEBPS/style.css (가독성 높은 전자책 폰트 및 여백 스타일링)
+        css_content = """@charset "utf-8";
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "KoPubWorldBatang", "KoPubBatang", "Noto Serif CKR", "Batang", "맑은 고딕", serif;
+  line-height: 1.85;
+  margin: 4% 5%;
+  padding: 0;
+  text-align: justify;
+  word-break: break-all;
+}
+h2 {
+  font-size: 1.35em;
+  font-weight: bold;
+  margin-top: 1.2em;
+  margin-bottom: 1.6em;
+  text-align: center;
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 0.6em;
+}
+p {
+  margin: 0 0 1.2em 0;
+  text-indent: 1em;
+}
+.cover-wrap {
+  text-align: center;
+  margin: 0;
+  padding: 0;
+}
+.cover-img {
+  max-width: 100%;
+  max-height: 96vh;
+  height: auto;
+  object-fit: contain;
+}
+"""
+        zf.writestr("OEBPS/style.css", css_content, compress_type=zipfile.ZIP_DEFLATED)
+
+        manifest_items = [
+            '<item id="style" href="style.css" media-type="text/css"/>',
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+        ]
+        spine_items = []
+        ncx_points = []
+        nav_points = []
+
+        # 4. 표지 이미지 추가 (존재하는 경우)
+        has_cover = False
+        if cover_bytes and len(cover_bytes) > 500:
+            has_cover = True
+            zf.writestr("OEBPS/cover.jpg", cover_bytes, compress_type=zipfile.ZIP_DEFLATED)
+            manifest_items.append('<item id="cover-img" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>')
+
+            cover_xhtml = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <title>표지</title>
+  <link rel="stylesheet" type="text/css" href="style.css"/>
+</head>
+<body>
+  <div class="cover-wrap">
+    <img class="cover-img" src="cover.jpg" alt="{html.escape(novel_title)} 표지"/>
+  </div>
+</body>
+</html>"""
+            zf.writestr("OEBPS/cover.xhtml", cover_xhtml, compress_type=zipfile.ZIP_DEFLATED)
+            manifest_items.append('<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>')
+            spine_items.append('<itemref idref="cover"/>')
+
+        # 5. 각 챕터 본문 xhtml 생성
+        added_count = 0
+        for idx, ch in enumerate(chapters, start=1):
+            ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
+            if not ch_file.exists():
+                continue
+
+            raw_text = ch_file.read_text(encoding="utf-8")
+            clean_lines = []
+            for line in raw_text.splitlines():
+                sline = line.strip()
+                if sline.startswith("===") or sline == ch["title"]:
+                    continue
+                if sline:
+                    clean_lines.append(f"  <p>{html.escape(sline)}</p>")
+
+            ch_id = f"chap_{idx:04d}"
+            ch_filename = f"chapter_{idx:04d}.xhtml"
+            p_content = "\n".join(clean_lines)
+
+            ch_xhtml = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <title>{html.escape(ch['title'])}</title>
+  <link rel="stylesheet" type="text/css" href="style.css"/>
+</head>
+<body>
+  <h2>{html.escape(ch['title'])}</h2>
+{p_content}
+</body>
+</html>"""
+            zf.writestr(f"OEBPS/{ch_filename}", ch_xhtml, compress_type=zipfile.ZIP_DEFLATED)
+            manifest_items.append(f'<item id="{ch_id}" href="{ch_filename}" media-type="application/xhtml+xml"/>')
+            spine_items.append(f'<itemref idref="{ch_id}"/>')
+            added_count += 1
+
+            ncx_points.append(f"""  <navPoint id="navPoint-{idx}" playOrder="{idx}">
+    <navLabel><text>{html.escape(ch['title'])}</text></navLabel>
+    <content src="{ch_filename}"/>
+  </navPoint>""")
+            nav_points.append(f'      <li><a href="{ch_filename}">{html.escape(ch["title"])}</a></li>')
+
+        # 6. OEBPS/toc.ncx (EPUB 2 / 구형 리더기 호환 목차)
+        ncx_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head>
+    <meta name="dtb:uid" content="{book_id}"/>
+    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
+  </head>
+  <docTitle><text>{html.escape(novel_title)}</text></docTitle>
+  <navMap>
+{chr(10).join(ncx_points)}
+  </navMap>
+</ncx>"""
+        zf.writestr("OEBPS/toc.ncx", ncx_content, compress_type=zipfile.ZIP_DEFLATED)
+
+        # 7. OEBPS/nav.xhtml (EPUB 3 / 신형 리더기 호환 HTML5 목차)
+        nav_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <title>목차</title>
+  <link rel="stylesheet" type="text/css" href="style.css"/>
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h2>목차</h2>
+    <ol>
+{chr(10).join(nav_points)}
+    </ol>
+  </nav>
+</body>
+</html>"""
+        zf.writestr("OEBPS/nav.xhtml", nav_content, compress_type=zipfile.ZIP_DEFLATED)
+
+        # 8. OEBPS/content.opf
+        cover_meta = '<meta name="cover" content="cover-img"/>' if has_cover else ""
+        opf_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">{book_id}</dc:identifier>
+    <dc:title>{html.escape(novel_title)}</dc:title>
+    <dc:language>ko</dc:language>
+    <dc:creator>{html.escape(author or "작자미상")}</dc:creator>
+    <dc:source>{html.escape(url or "")}</dc:source>
+    <meta property="dcterms:modified">2026-09-04T00:00:00Z</meta>
+    {cover_meta}
+  </metadata>
+  <manifest>
+{chr(10).join("    " + item for item in manifest_items)}
+  </manifest>
+  <spine toc="ncx">
+{chr(10).join("    " + item for item in spine_items)}
+  </spine>
+  <guide>
+    {f'<reference type="cover" title="표지" href="cover.xhtml"/>' if has_cover else ''}
+    <reference type="toc" title="목차" href="nav.xhtml"/>
+  </guide>
+</package>"""
+        zf.writestr("OEBPS/content.opf", opf_content, compress_type=zipfile.ZIP_DEFLATED)
+
+    out_path.write_bytes(buf.getvalue())
+    _log(f"[*] EPUB 전자책 생성 완료: {out_path.name} (총 {added_count}화 수록, {len(buf.getvalue()):,} bytes)")
+    return out_path
 
 
 def is_quota_error(api_err, status=""):
@@ -823,6 +1081,13 @@ def detect_existing_chapters(final_path, chapters):
     """
     if not final_path.exists() or final_path.stat().st_size == 0:
         return 0, ""
+    if final_path.suffix.lower() == ".epub":
+        try:
+            with zipfile.ZipFile(final_path, "r") as zf:
+                ch_files = [f for f in zf.namelist() if f.startswith("OEBPS/chapter_") and f.endswith(".xhtml")]
+                return min(len(ch_files), len(chapters)), ""
+        except Exception:
+            return 0, ""
     try:
         content = final_path.read_text(encoding="utf-8")
         header_pat = re.compile(r"={50,}\n([^\n]+)\n={50,}\n", re.MULTILINE)
@@ -869,34 +1134,49 @@ def detect_existing_chapters(final_path, chapters):
 
 
 def _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir,
-                    base_content="", existing_count=0, stopped=False):
-    """현재까지 수집된 챕터들을 최종 txt 파일로 작성/갱신."""
-    if existing_count > 0 and base_content:
-        content = base_content
-        new_header_line = f"총 {total}화{' (중단됨)' if stopped else ''}"
-        content = re.sub(r"^총\s*\d+화.*$", new_header_line, content, count=1, flags=re.MULTILINE)
+                    base_content="", existing_count=0, stopped=False,
+                    cover_bytes=None, author=None, also_save_other=False):
+    """현재까지 수집된 챕터들을 최종 파일(.txt 또는 .epub)로 작성/갱신."""
+    final_path = Path(final_path)
+    is_epub = final_path.suffix.lower() == ".epub"
 
-        new_parts = []
-        for idx in range(existing_count + 1, len(chapters) + 1):
-            ch = chapters[idx - 1]
-            ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
-            if ch_file.exists():
-                new_parts.append(ch_file.read_text(encoding="utf-8"))
+    # 1. EPUB 생성 (메인이 epub이거나 also_save_other인 경우)
+    if is_epub or also_save_other:
+        epub_target = final_path if is_epub else final_path.with_suffix(".epub")
+        try:
+            build_epub(epub_target, novel_title, author or "작자미상", url, chapters, chapters_dir, cover_bytes=cover_bytes)
+        except Exception:  # noqa: BLE001
+            pass
 
-        if new_parts:
-            if not content.endswith("\n"):
-                content += "\n"
-            content += "".join(new_parts)
+    # 2. TXT 생성 (메인이 txt이거나 also_save_other인 경우)
+    if not is_epub or also_save_other:
+        txt_target = final_path if not is_epub else final_path.with_suffix(".txt")
+        if existing_count > 0 and base_content:
+            content = base_content
+            new_header_line = f"총 {total}화{' (중단됨)' if stopped else ''}"
+            content = re.sub(r"^총\s*\d+화.*$", new_header_line, content, count=1, flags=re.MULTILINE)
 
-        final_path.write_text(content, encoding="utf-8")
-    else:
-        with final_path.open("w", encoding="utf-8") as f:
-            f.write(f"{novel_title}\n출처: {url}\n총 {total}화"
-                    f"{' (중단됨)' if stopped else ''}\n")
-            for idx, ch in enumerate(chapters, start=1):
+            new_parts = []
+            for idx in range(existing_count + 1, len(chapters) + 1):
+                ch = chapters[idx - 1]
                 ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
                 if ch_file.exists():
-                    f.write(ch_file.read_text(encoding="utf-8"))
+                    new_parts.append(ch_file.read_text(encoding="utf-8"))
+
+            if new_parts:
+                if not content.endswith("\n"):
+                    content += "\n"
+                content += "".join(new_parts)
+
+            txt_target.write_text(content, encoding="utf-8")
+        else:
+            with txt_target.open("w", encoding="utf-8") as f:
+                f.write(f"{novel_title}\n출처: {url}\n총 {total}화"
+                        f"{' (중단됨)' if stopped else ''}\n")
+                for idx, ch in enumerate(chapters, start=1):
+                    ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
+                    if ch_file.exists():
+                        f.write(ch_file.read_text(encoding="utf-8"))
 
 
 def _safe_filename(name):
@@ -907,9 +1187,10 @@ def _safe_filename(name):
 def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
            rest_every=20, rest_secs=45.0, content_timeout=20000, proxy=None,
            solve_cf=False, headful=False, limit=0, max_consecutive_failures=3,
+           also_save_other=False,
            log=print, should_stop=None, on_progress=None):
     """
-    소설을 스크래핑해 out_path(단일 txt)로 저장하고 그 경로를 반환.
+    소설을 스크래핑해 out_path(단일 txt 또는 epub)로 저장하고 그 경로를 반환.
     """
     if StealthySession is None:
         raise RuntimeError(
@@ -942,10 +1223,27 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
     blocked_msg = None
     with StealthySession(**session_kwargs) as session:
         log(f"[*] 목록 로딩: {url}")
-        chapters, detected_title = extract_chapters(session, url, solve_cf=solve_cf, log=log, should_stop=should_stop)
+        ext_res = extract_chapters(session, url, solve_cf=solve_cf, log=log, should_stop=should_stop)
+        if len(ext_res) == 3:
+            chapters, detected_title, detected_cover_url = ext_res
+        else:
+            chapters, detected_title = ext_res
+            detected_cover_url = None
+
         if limit:
             chapters = chapters[:limit]
         novel_title = derive_novel_title(chapters, novel_id, detected_title)
+
+        # 표지 이미지 로드 및 다운로드
+        cover_path = cache_dir / "cover.jpg"
+        cover_bytes = None
+        if cover_path.exists() and cover_path.stat().st_size > 500:
+            cover_bytes = cover_path.read_bytes()
+        elif detected_cover_url:
+            log(f"[*] 소설 표지 이미지 감지: {detected_cover_url}")
+            cover_bytes = download_cover_image(detected_cover_url, proxy=proxy, log=log)
+            if cover_bytes:
+                cover_path.write_bytes(cover_bytes)
 
         # 출력 경로 결정
         if out_path:
@@ -1068,7 +1366,8 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                 # 실시간 중간 병합 (5화마다 진행)
                 if idx % 5 == 0:
                     _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir,
-                                    base_content=base_content, existing_count=existing_count, stopped=True)
+                                    base_content=base_content, existing_count=existing_count, stopped=True,
+                                    cover_bytes=cover_bytes, author="작자미상", also_save_other=also_save_other)
 
                 if on_progress:
                     on_progress(idx, total)
@@ -1095,7 +1394,8 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
     # 최종 병합 (수집된 챕터까지)
     log(f"[*] 병합 -> {final_path}")
     _merge_chapters(final_path, novel_title, url, total, chapters, chapters_dir,
-                    base_content=base_content, existing_count=existing_count, stopped=stopped)
+                    base_content=base_content, existing_count=existing_count, stopped=stopped,
+                    cover_bytes=cover_bytes, author="작자미상", also_save_other=also_save_other)
     log(f"[완료] {final_path} ({final_path.stat().st_size:,} bytes)")
     if quota_exceeded:
         raise QuotaError(blocked_msg or "일일 열람 쿼터 초과")

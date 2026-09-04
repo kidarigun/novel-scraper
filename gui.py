@@ -145,15 +145,28 @@ class ScraperGUI:
 
         # 출력 파일
         ttk.Label(frm, text="저장 파일").grid(row=2, column=0, sticky="w", **pad)
-        default_out = str(self._default_downloads() / "소설.txt")
+        default_out = str(self._default_downloads() / "소설.epub")
         self.out_var = tk.StringVar(value=default_out)
         ttk.Entry(frm, textvariable=self.out_var).grid(row=2, column=1, sticky="ew", **pad)
         ttk.Button(frm, text="찾아보기…", command=self.browse_out).grid(
             row=2, column=2, sticky="e", **pad)
 
+        # 저장 포맷
+        fmt_frm = ttk.Frame(frm)
+        fmt_frm.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(frm, text="저장 포맷").grid(row=3, column=0, sticky="w", **pad)
+        self.file_format = tk.StringVar(value="epub")
+        ttk.Radiobutton(fmt_frm, text="EPUB 전자책 (.epub)", value="epub",
+                        variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 16))
+        ttk.Radiobutton(fmt_frm, text="텍스트 (.txt)", value="txt",
+                        variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 16))
+        self.also_save_other = tk.BooleanVar(value=False)
+        ttk.Checkbutton(fmt_frm, text="TXT와 EPUB 둘 다 동시 생성",
+                        variable=self.also_save_other).pack(side="left")
+
         # 옵션들
         opt = ttk.LabelFrame(frm, text="옵션")
-        opt.grid(row=3, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
+        opt.grid(row=4, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
         for c in range(6):
             opt.columnconfigure(c, weight=1)
 
@@ -196,7 +209,7 @@ class ScraperGUI:
 
         # 버튼
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        btns.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.start_btn = ttk.Button(btns, text="시작", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text="중지", command=self.stop, state="disabled")
@@ -208,18 +221,18 @@ class ScraperGUI:
 
         # 진행률
         self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        self.progress.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.status_var = tk.StringVar(value="대기 중")
         ttk.Label(frm, textvariable=self.status_var).grid(
-            row=6, column=0, columnspan=3, sticky="w", padx=12)
+            row=7, column=0, columnspan=3, sticky="w", padx=12)
 
         # 로그
         self.log_txt = tk.Text(frm, height=13, wrap="word", state="disabled",
                                font=("Consolas", 13))
-        self.log_txt.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
-        frm.rowconfigure(7, weight=1)
+        self.log_txt.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
+        frm.rowconfigure(8, weight=1)
         sb = ttk.Scrollbar(frm, command=self.log_txt.yview)
-        sb.grid(row=7, column=3, sticky="ns", pady=8)
+        sb.grid(row=8, column=3, sticky="ns", pady=8)
         self.log_txt["yscrollcommand"] = sb.set
 
         self._last_clipboard = ""
@@ -243,13 +256,23 @@ class ScraperGUI:
         if display_list and not self.history_var.get():
             self.history_var.set(display_list[0])
 
+    def _on_format_changed(self):
+        curr = self.out_var.get().strip()
+        if not curr:
+            return
+        p = Path(curr)
+        new_ext = ".epub" if self.file_format.get() == "epub" else ".txt"
+        if p.suffix.lower() in [".txt", ".epub"]:
+            self.out_var.set(str(p.with_suffix(new_ext)))
+
     def on_history_selected(self, event=None):
         label = self.history_var.get()
         item = self.cached_novels_map.get(label)
         if item:
             self.url_var.set(item["url"])
             safe_name = scrape_novel._safe_filename(item["title"])
-            out_file = str(self._default_downloads() / f"{safe_name}.txt")
+            ext = ".epub" if self.file_format.get() == "epub" else ".txt"
+            out_file = str(self._default_downloads() / f"{safe_name}{ext}")
             out_file = re.sub(r"[\r\n\t]+", "", out_file)
             self.out_var.set(out_file)
 
@@ -268,16 +291,22 @@ class ScraperGUI:
         return d if d.exists() else Path.home()
 
     def browse_out(self):
-        init = Path(self.out_var.get() or (self._default_downloads() / "소설.txt"))
+        ext = ".epub" if self.file_format.get() == "epub" else ".txt"
+        init = Path(self.out_var.get() or (self._default_downloads() / f"소설{ext}"))
+        ftypes = [("EPUB 전자책", "*.epub"), ("텍스트 파일", "*.txt"), ("모든 파일", "*.*")] if ext == ".epub" else [("텍스트 파일", "*.txt"), ("EPUB 전자책", "*.epub"), ("모든 파일", "*.*")]
         path = filedialog.asksaveasfilename(
             title="저장 위치와 파일 이름 선택",
-            defaultextension=".txt",
+            defaultextension=ext,
             initialdir=str(init.parent),
             initialfile=init.name,
-            filetypes=[("텍스트 파일", "*.txt"), ("모든 파일", "*.*")],
+            filetypes=ftypes,
         )
         if path:
             self.out_var.set(path)
+            if path.lower().endswith(".epub"):
+                self.file_format.set("epub")
+            elif path.lower().endswith(".txt"):
+                self.file_format.set("txt")
 
     def clear_log(self):
         self.log_txt["state"] = "normal"
@@ -303,11 +332,12 @@ class ScraperGUI:
                     url, title = data
                     if self.url_var.get() == url:
                         safe_name = scrape_novel._safe_filename(title)
-                        out_file = str(self._default_downloads() / f"{safe_name}.txt")
+                        ext = ".epub" if self.file_format.get() == "epub" else ".txt"
+                        out_file = str(self._default_downloads() / f"{safe_name}{ext}")
                         out_file = re.sub(r"[\r\n\t]+", "", out_file)
                         self.out_var.set(out_file)
                         self.status_var.set("대기 중")
-                        self._log(f"[*] 소설 제목 확인: {title} -> 저장 파일: {safe_name}.txt")
+                        self._log(f"[*] 소설 제목 확인: {title} -> 저장 파일: {safe_name}{ext}")
                         if self.auto_start_on_clipboard.get() and not (self.worker and self.worker.is_alive()):
                             self.start()
                 elif kind == "progress":
@@ -367,12 +397,13 @@ class ScraperGUI:
         except Exception:
             pass
 
+        ext = ".epub" if self.file_format.get() == "epub" else ".txt"
         if cached_title:
             safe_name = scrape_novel._safe_filename(cached_title)
-            out_file = str(self._default_downloads() / f"{safe_name}.txt")
+            out_file = str(self._default_downloads() / f"{safe_name}{ext}")
             out_file = re.sub(r"[\r\n\t]+", "", out_file)
             self.out_var.set(out_file)
-            self._log(f"[*] 소설 제목 확인(이력): {cached_title} -> 저장 파일: {safe_name}.txt")
+            self._log(f"[*] 소설 제목 확인(이력): {cached_title} -> 저장 파일: {safe_name}{ext}")
             if auto_start and not (self.worker and self.worker.is_alive()):
                 self.start()
         else:
@@ -410,6 +441,7 @@ class ScraperGUI:
             proxy=self.proxy.get().strip() or None,
             headful=bool(self.headful.get()),
             solve_cf=bool(self.solve_cf.get()),
+            also_save_other=bool(self.also_save_other.get()),
         )
         self.worker = threading.Thread(target=self._run, kwargs=params, daemon=True)
         self.worker.start()
@@ -422,6 +454,7 @@ class ScraperGUI:
                 min_delay=params["min_delay"], max_delay=params["max_delay"],
                 limit=params["limit"], proxy=params["proxy"],
                 headful=params["headful"], solve_cf=params["solve_cf"],
+                also_save_other=params.get("also_save_other", False),
                 log=self._log, should_stop=self.stop_event.is_set,
                 on_progress=self._progress,
             )

@@ -160,6 +160,69 @@ class ExtractBodyTests(unittest.TestCase):
         title = scrape_novel.quick_fetch_novel_title("https://invalid-non-existent-domain.xyz/novel/99999")
         self.assertEqual(title, "소설_99999")
 
+    def test_build_epub_valid_structure(self):
+        import tempfile
+        import zipfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            chap_dir = tmp / "chapters"
+            chap_dir.mkdir()
+            (chap_dir / "0001_101.txt").write_text("====================\n1화\n====================\n첫 문장입니다.\n\n두 번째 문장입니다.", encoding="utf-8")
+            (chap_dir / "0002_102.txt").write_text("====================\n2화\n====================\n2화 본문입니다.", encoding="utf-8")
+
+            chapters = [
+                {"episode_id": 101, "title": "1화 - 시작", "no": 1},
+                {"episode_id": 102, "title": "2화 - 계속", "no": 2},
+            ]
+            fake_cover = b"\xff\xd8\xff\xe0" + b"\x00" * 600  # Fake JPEG bytes (> 500 bytes)
+            epub_path = tmp / "test_novel.epub"
+
+            scrape_novel.build_epub(
+                epub_path, "테스트 소설", "작가", "https://newtoki1.org/novel/999",
+                chapters, chap_dir, cover_bytes=fake_cover
+            )
+            self.assertTrue(epub_path.exists())
+
+            with zipfile.ZipFile(epub_path, "r") as zf:
+                names = zf.namelist()
+                self.assertEqual(names[0], "mimetype")
+                self.assertEqual(zf.getinfo("mimetype").compress_type, zipfile.ZIP_STORED)
+                self.assertIn("META-INF/container.xml", names)
+                self.assertIn("OEBPS/content.opf", names)
+                self.assertIn("OEBPS/toc.ncx", names)
+                self.assertIn("OEBPS/nav.xhtml", names)
+                self.assertIn("OEBPS/style.css", names)
+                self.assertIn("OEBPS/cover.jpg", names)
+                self.assertIn("OEBPS/cover.xhtml", names)
+                self.assertIn("OEBPS/chapter_0001.xhtml", names)
+                self.assertIn("OEBPS/chapter_0002.xhtml", names)
+
+                # 검증: detect_existing_chapters 가 EPUB 에서도 챕터 수를 감지하는지
+                found_count, _ = scrape_novel.detect_existing_chapters(epub_path, chapters)
+                self.assertEqual(found_count, 2)
+
+    def test_merge_chapters_both_formats(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            chap_dir = tmp / "chapters"
+            chap_dir.mkdir()
+            (chap_dir / "0001_101.txt").write_text("1화 본문", encoding="utf-8")
+
+            chapters = [{"episode_id": 101, "title": "1화", "no": 1}]
+            epub_target = tmp / "novel.epub"
+
+            scrape_novel._merge_chapters(
+                epub_target, "동시 저장 소설", "https://newtoki1.org/novel/123",
+                1, chapters, chap_dir, also_save_other=True
+            )
+            self.assertTrue(epub_target.exists())
+            self.assertTrue((tmp / "novel.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
