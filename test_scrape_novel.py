@@ -129,7 +129,7 @@ class ExtractBodyTests(unittest.TestCase):
             r.destroy()
 
     def test_chapter_sort_key_with_prologue_and_numbers(self):
-        # 4페이지 역순으로 수집된 챕터들이 1화부터 오름차순으로 정렬되는지 검증
+        # 4페이지 역순으로 수집된 챕터들이 episode_id 기준으로 1화부터 오름차순 정렬되는지 검증
         items = [
             {"episode_id": 8638489, "no": 25, "title": "25화"},
             {"episode_id": 8638488, "no": 24, "title": "24화"},
@@ -138,22 +138,27 @@ class ExtractBodyTests(unittest.TestCase):
             {"episode_id": 8638464, "no": None, "title": "프롤로그"},
         ]
 
-        def _sort_key(it):
-            no = it.get("no")
-            eid = it.get("episode_id", 0)
-            if no is not None:
-                return (0, no, eid)
-            title = it.get("title", "")
-            if re.search(r"프롤로그|prologue", title, re.I):
-                return (0, 0, eid)
-            return (1, eid, eid)
-
-        items.sort(key=_sort_key)
+        items.sort(key=lambda it: it["episode_id"])
         self.assertEqual(items[0]["title"], "프롤로그")
         self.assertEqual(items[1]["no"], 1)
         self.assertEqual(items[2]["no"], 2)
         self.assertEqual(items[3]["no"], 24)
         self.assertEqual(items[4]["no"], 25)
+
+    def test_chapter_sort_by_episode_id_with_side_stories(self):
+        # 본편 제목에 '화'가 없고 외전에 '1화'가 포함된 경우 (소설 63772 케이스)
+        # '외전 1화'가 번호 1 때문에 첫 화로 오지 않고, episode_id 순서대로 마지막에 정렬되는지 검증
+        items = [
+            {"episode_id": 8710170, "no": 1, "title": "외전 1화"},
+            {"episode_id": 8710171, "no": 2, "title": "외전 2화"},
+            {"episode_id": 8709794, "no": None, "title": "각성하다 (1)"},
+            {"episode_id": 8709795, "no": None, "title": "각성하다 (2)"},
+        ]
+        items.sort(key=lambda it: it["episode_id"])
+        self.assertEqual(items[0]["title"], "각성하다 (1)")
+        self.assertEqual(items[1]["title"], "각성하다 (2)")
+        self.assertEqual(items[2]["title"], "외전 1화")
+        self.assertEqual(items[3]["title"], "외전 2화")
 
     def test_quick_fetch_novel_title_fallback(self):
         # 유효하지 않은 네트워크 상황에서도 최소 소설_{id} 형태로 반환하는지 검증

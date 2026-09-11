@@ -568,18 +568,10 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
     if not items:
         raise ValueError("챕터 링크를 찾지 못했습니다. URL을 확인하세요.")
 
-    # 챕터 순서 정렬: 회차 번호가 있으면 회차 번호 오름차순(1화, 2화, ...), 프롤로그는 0, 미표기 시 episode_id 오름차순
-    def _chapter_sort_key(it):
-        no = it.get("no")
-        eid = it.get("episode_id", 0)
-        if no is not None:
-            return (0, no, eid)
-        title = it.get("title", "")
-        if re.search(r"프롤로그|prologue", title, re.IGNORECASE):
-            return (0, 0, eid)
-        return (1, eid, eid)
-
-    items.sort(key=_chapter_sort_key)
+    # 챕터 순서 정렬: 사이트(뉴토끼)의 episode_id는 게시글 고유번호(wr_id)로 등록 순서(연재 순서)와 일치합니다.
+    # 제목 내 번호(no) 기반 정렬 시 '외전 1화' 등이 본편 1화보다 앞에 오거나 본편 제목에 '화'가 없을 때
+    # 외전이 첫 화로 오인되는 문제가 발생하므로, 항상 episode_id 오름차순으로 정렬합니다.
+    items.sort(key=lambda it: it["episode_id"])
     return items, detected_title, detected_cover_url
 
 
