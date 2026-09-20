@@ -1271,6 +1271,7 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
             on_progress(len(state["done"]), total)
 
         consecutive_fail = 0
+        last_failed_idx = None
         try:
             _interruptible_sleep(random.uniform(min_delay, max_delay), should_stop)
             for idx, ch in enumerate(chapters, start=1):
@@ -1278,6 +1279,9 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                 ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
                 if key in state["done"] and ch_file.exists():
                     log(f"[{idx}/{total}] 건너뜀(완료): {ch['title']}")
+                    # 이미 완료된 회차를 건너뛰는 경우: 이전 실패와의 일련번호 연속성이 끊어짐
+                    consecutive_fail = 0
+                    last_failed_idx = None
                     if on_progress:
                         on_progress(idx, total)
                     continue
@@ -1294,12 +1298,8 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                 except Exception:  # noqa: BLE001
                     pass
 
-                if is_quota_error(api_err):
-                    quota_exceeded = True
-                    raise QuotaError(f"일일 열람 쿼터 초과 ({api_err}). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
-
                 body = extract_body(page, ch["title"])
-                if not body:
+                if not body and not is_quota_error(api_err):
                     log("    ! 본문 비어있음. 6초 대기 후 재탐색")
                     _interruptible_sleep(6, should_stop)
                     try:
@@ -1314,32 +1314,35 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                     except Exception:  # noqa: BLE001
                         pass
 
-                    if is_quota_error(api_err):
-                        quota_exceeded = True
-                        raise QuotaError(f"일일 열람 쿼터 초과 ({api_err}). 24시간 또는 일일 쿼터 리셋 후 이어서 진행할 수 있습니다.")
-
                     body = extract_body(page, ch["title"])
 
-                if not body:
-                    consecutive_fail += 1
+                if not body or is_quota_error(api_err):
                     status = get_status_message(page)
-                    log(f"    x 실패 ({consecutive_fail}/{max_consecutive_failures})"
-                        + (f" — 사이트 메시지: {status}" if status else ""))
-                    if is_quota_error(api_err, status):
-                        quota_exceeded = True
-                        raise QuotaError(f"일일 쿼터 또는 접근 제한: {status or api_err}")
+                    quota_detected = is_quota_error(api_err, status)
 
+                    # 일련번호(idx)가 직전 실패와 연속적인지 확인
+                    if last_failed_idx is not None and idx == last_failed_idx + 1:
+                        consecutive_fail += 1
+                    else:
+                        consecutive_fail = 1
+                    last_failed_idx = idx
+
+                    err_hint = status or api_err or ""
+                    log(f"    x 실패 (연속 {consecutive_fail}/{max_consecutive_failures}화)"
+                        + (f" — 사이트 메시지: {err_hint}" if err_hint else ""))
+
+                    # 일련번호가 연속으로 max_consecutive_failures회 이상 실패했을 때만 대기/차단 모드 진입
                     if consecutive_fail >= max_consecutive_failures:
-                        if is_quota_error(api_err, status) or len(state["done"]) > 0:
+                        if quota_detected or len(state["done"]) > 0:
                             quota_exceeded = True
                             raise QuotaError(
-                                f"일일 열람 쿼터 또는 사이트 접근 제한에 도달했습니다.\n\n"
-                                + (f"사이트 메시지: {status}\n\n" if status else "")
+                                f"연속 {consecutive_fail}개 회차의 본문 수집 실패로 일일 열람 쿼터 또는 사이트 접근 제한에 도달했습니다.\n\n"
+                                + (f"사이트 메시지: {err_hint}\n\n" if err_hint else "")
                                 + "잠시(수 시간~하루) 기다린 후 이어서 수집을 재개할 수 있습니다."
                             )
                         raise BlockedError(
                             f"연속 {consecutive_fail}회 본문을 가져오지 못해 중단했습니다.\n\n"
-                            + (f"사이트 메시지: {status}\n\n" if status else "")
+                            + (f"사이트 메시지: {err_hint}\n\n" if err_hint else "")
                             + "사이트가 자동 접근을 감지해 본문 제공을 막은 상태로 보입니다.\n"
                               "잠시(수 시간~하루) 기다렸다가 다시 시도하고, 지연 시간을 크게 늘리세요.\n"
                               "이미 받은 화는 그대로 보존되며 다음 실행에서 이어받습니다."
@@ -1349,6 +1352,7 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                     continue
 
                 consecutive_fail = 0
+                last_failed_idx = None
                 header = f"\n\n{'=' * 60}\n{ch['title']}\n{'=' * 60}\n\n"
                 ch_file.write_text(header + body, encoding="utf-8")
                 state["done"][key] = {"idx": idx, "title": ch["title"], "chars": len(body)}

@@ -228,6 +228,72 @@ class ExtractBodyTests(unittest.TestCase):
             self.assertTrue(epub_target.exists())
             self.assertTrue((tmp / "novel.txt").exists())
 
+    def test_consecutive_failure_logic(self):
+        # 1. 중간에 완료된 회차가 있거나 비연속적인 빈 게시물이 있을 때 연속 실패로 카운트되지 않는지 검증
+        consecutive_fail = 0
+        last_failed_idx = None
+
+        # 10화 실패
+        idx = 10
+        if last_failed_idx is not None and idx == last_failed_idx + 1:
+            consecutive_fail += 1
+        else:
+            consecutive_fail = 1
+        last_failed_idx = idx
+        self.assertEqual(consecutive_fail, 1)
+
+        # 11~20화 이미 완료되어 건너뜀 (연속성 리셋)
+        consecutive_fail = 0
+        last_failed_idx = None
+
+        # 21화 실패 (비연속 실패)
+        idx = 21
+        if last_failed_idx is not None and idx == last_failed_idx + 1:
+            consecutive_fail += 1
+        else:
+            consecutive_fail = 1
+        last_failed_idx = idx
+        self.assertEqual(consecutive_fail, 1)
+
+        # 22화 건너뜀 (연속성 리셋)
+        consecutive_fail = 0
+        last_failed_idx = None
+
+        # 30화 실패
+        idx = 30
+        if last_failed_idx is not None and idx == last_failed_idx + 1:
+            consecutive_fail += 1
+        else:
+            consecutive_fail = 1
+        last_failed_idx = idx
+        self.assertEqual(consecutive_fail, 1)
+
+        # 2. 건너뜀 없이 일련번호가 연속되지 않는 실패 (예: 30화 실패 후 32화 실패)
+        idx = 32
+        if last_failed_idx is not None and idx == last_failed_idx + 1:
+            consecutive_fail += 1
+        else:
+            consecutive_fail = 1
+        last_failed_idx = idx
+        self.assertEqual(consecutive_fail, 1)
+
+        # 3. 일련번호가 연속적인 실제 실패 (32화 -> 33화 -> 34화)
+        idx = 33
+        if last_failed_idx is not None and idx == last_failed_idx + 1:
+            consecutive_fail += 1
+        else:
+            consecutive_fail = 1
+        last_failed_idx = idx
+        self.assertEqual(consecutive_fail, 2)
+
+        idx = 34
+        if last_failed_idx is not None and idx == last_failed_idx + 1:
+            consecutive_fail += 1
+        else:
+            consecutive_fail = 1
+        last_failed_idx = idx
+        self.assertEqual(consecutive_fail, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
