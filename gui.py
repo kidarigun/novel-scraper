@@ -358,7 +358,9 @@ class ScraperGUI:
             self.ongoing_count_lbl.config(text=f"등록된 소설: {len(novels)}편")
 
         for n in novels:
-            clean_title = re.sub(r"[\r\n\t\s]+", " ", n.get("title") or "").strip()
+            raw_title = n.get("title") or ""
+            clean_title = scrape_novel.format_ongoing_filename(raw_title, 0)
+            clean_title = re.sub(r"[\r\n\t\s]+", " ", clean_title).strip()
             total_str = f"{n.get('total')}화" if n.get("total") else "-"
             fmt_str = (n.get("format") or "epub").upper()
             if hasattr(self, "ongoing_tree"):
@@ -496,13 +498,17 @@ class ScraperGUI:
                 success_count += 1
                 try:
                     nid = scrape_novel.parse_novel_id(url)
-                    cache_dir = scrape_novel.CACHE_ROOT / nid
-                    state_file = cache_dir / "state.json"
-                    if state_file.exists():
-                        s_data = json.loads(state_file.read_text(encoding="utf-8"))
-                        novel["total"] = s_data.get("total", novel.get("total", 0))
-                        novel["title"] = s_data.get("title", title)
-                        scrape_novel.save_ongoing_novel(novel)
+                    latest_ep = scrape_novel.get_latest_done_episode(nid)
+                    if latest_ep > 0:
+                        new_path = scrape_novel.rename_ongoing_file(path, latest_ep, also_save_other=also_save_other)
+                        if new_path and new_path.exists():
+                            path = str(new_path)
+                            self._log(f"[*] 연재중 파일명 최종화 갱신: {new_path.name}")
+                    final_p = Path(path)
+                    novel["total"] = latest_ep if latest_ep > 0 else novel.get("total", 0)
+                    novel["out_path"] = path
+                    novel["title"] = scrape_novel.format_ongoing_filename(final_p.stem, 0)
+                    scrape_novel.save_ongoing_novel(novel)
                 except Exception:
                     pass
             except (scrape_novel.QuotaError, scrape_novel.BlockedError) as e:
@@ -761,18 +767,28 @@ class ScraperGUI:
             result["ok"] = True
             result["path"] = path
 
-            # 연재중 소설 등록 갱신
+            # 연재중 소설 등록 및 최종화 번호 파일명 갱신
             if params.get("is_ongoing"):
                 try:
                     nid = scrape_novel.parse_novel_id(params["url"])
+                    latest_ep = scrape_novel.get_latest_done_episode(nid)
+                    if latest_ep > 0:
+                        new_path = scrape_novel.rename_ongoing_file(
+                            path, latest_ep, also_save_other=params.get("also_save_other", False)
+                        )
+                        if new_path and new_path.exists():
+                            path = str(new_path)
+                            result["path"] = path
+                            self._log(f"[*] 연재중 파일명 최종화 갱신: {new_path.name}")
                     final_p = Path(path)
                     scrape_novel.save_ongoing_novel({
                         "novel_id": nid,
-                        "title": final_p.stem,
+                        "title": scrape_novel.format_ongoing_filename(final_p.stem, 0),
                         "url": params["url"],
                         "out_path": str(final_p),
                         "format": "epub" if final_p.suffix.lower() == ".epub" else "txt",
                         "also_save_other": bool(params.get("also_save_other", False)),
+                        "total": latest_ep if latest_ep > 0 else 0,
                     })
                 except Exception:
                     pass
@@ -815,6 +831,8 @@ class ScraperGUI:
             self.status_var.set("연재중 업데이트 완료")
             messagebox.showinfo("업데이트 완료", result.get("summary", "연재중 소설 업데이트가 완료되었습니다."))
         elif result["ok"]:
+            if result.get("path"):
+                self.out_var.set(result["path"])
             self.status_var.set("완료")
             if messagebox.askyesno("완료", f"저장 완료:\n{result['path']}\n\n폴더를 열까요?"):
                 self._open_folder(result["path"])

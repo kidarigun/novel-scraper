@@ -1106,6 +1106,91 @@ def is_ongoing_novel(novel_id, cache_root=None):
     return any(str(n.get("novel_id")) == nid for n in novels)
 
 
+def format_ongoing_filename(base_stem: str, latest_ep: int = 0) -> str:
+    """소설 파일명(stem) 끝에 최신 화수 번호를 붙이거나 기존 번호를 갱신.
+    예:
+      '소설제목' + 150 -> '소설제목 [150화]'
+      '소설제목 [120화]' + 150 -> '소설제목 [150화]'
+      '소설제목 [120화]' + 0 -> '소설제목' (순수 제목 추출)
+    """
+    clean = re.sub(r'[\s_]*[\[\(~-]?\s*(?:\d+[-~])?\d+\s*화\s*[\]\)]?$', '', base_stem).strip()
+    if not clean:
+        clean = base_stem
+    if latest_ep is None or latest_ep <= 0:
+        return clean
+    return f"{clean} [{latest_ep}화]"
+
+
+def get_latest_done_episode(novel_id, cache_root=None):
+    """state.json에서 현재까지 수집 완료된 가장 큰 회차 번호(idx)를 반환."""
+    root = Path(cache_root) if cache_root else CACHE_ROOT
+    state_file = root / str(novel_id) / "state.json"
+    if not state_file.exists():
+        return 0
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        done = data.get("done", {})
+        if done:
+            max_idx = 0
+            for v in done.values():
+                if isinstance(v, dict):
+                    idx = v.get("idx", 0)
+                elif isinstance(v, int):
+                    idx = v
+                else:
+                    idx = 0
+                if idx > max_idx:
+                    max_idx = idx
+            return max_idx
+    except Exception:
+        pass
+    return 0
+
+
+def rename_ongoing_file(file_path, latest_ep, also_save_other=False):
+    """연재중 소설 파일(및 동시 저장된 파일)의 끝에 최신 화수를 붙여 이름을 변경.
+    성공 시 새 파일 경로(Path)를 반환하고, 실패하거나 변경이 필요 없으면 원래 경로 반환.
+    """
+    if not file_path or not latest_ep or latest_ep <= 0:
+        return Path(file_path) if file_path else None
+
+    p = Path(file_path)
+    new_stem = format_ongoing_filename(p.stem, latest_ep)
+    if new_stem == p.stem:
+        return p
+
+    new_path = p.with_name(f"{new_stem}{p.suffix}")
+
+    # 1. 메인 파일 rename
+    if p.exists():
+        try:
+            if new_path.exists() and new_path.resolve() != p.resolve():
+                try:
+                    new_path.unlink()
+                except Exception:
+                    pass
+            p.rename(new_path)
+        except Exception:
+            pass
+
+    # 2. also_save_other (.txt <-> .epub) 파일도 함께 rename
+    other_ext = ".txt" if p.suffix.lower() == ".epub" else ".epub"
+    other_old = p.with_suffix(other_ext)
+    other_new = new_path.with_suffix(other_ext)
+    if other_old.exists():
+        try:
+            if other_new.exists() and other_new.resolve() != other_old.resolve():
+                try:
+                    other_new.unlink()
+                except Exception:
+                    pass
+            other_old.rename(other_new)
+        except Exception:
+            pass
+
+    return new_path
+
+
 def _load_state(path):
     if path.exists():
         try:

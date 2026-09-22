@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 
@@ -349,6 +350,65 @@ class ExtractBodyTests(unittest.TestCase):
             ongoing = scrape_novel.get_ongoing_novels(tmp_root)
             self.assertEqual(len(ongoing), 1)
             self.assertEqual(ongoing[0]["novel_id"], "63772")
+
+    def test_format_ongoing_filename_and_rename(self):
+        import tempfile
+        from pathlib import Path
+
+        # 1. format_ongoing_filename 검증
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목", 150), "소설제목 [150화]")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [150화]", 180), "소설제목 [180화]")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 (150화)", 180), "소설제목 [180화]")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 ~150화", 180), "소설제목 [180화]")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 150화", 180), "소설제목 [180화]")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [1-150화]", 180), "소설제목 [180화]")
+        # 0 이하일 때 clean stem 반환 검증
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [150화]", 0), "소설제목")
+
+        # 2. rename_ongoing_file 검증 (메인 파일 및 동시 저장 포맷)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            epub_file = tmp / "나 혼자만 레벨업.epub"
+            txt_file = tmp / "나 혼자만 레벨업.txt"
+            epub_file.write_text("fake epub", encoding="utf-8")
+            txt_file.write_text("fake txt", encoding="utf-8")
+
+            # 150화로 rename
+            new_path = scrape_novel.rename_ongoing_file(epub_file, 150, also_save_other=True)
+            expected_epub = tmp / "나 혼자만 레벨업 [150화].epub"
+            expected_txt = tmp / "나 혼자만 레벨업 [150화].txt"
+
+            self.assertEqual(new_path, expected_epub)
+            self.assertTrue(expected_epub.exists())
+            self.assertTrue(expected_txt.exists())
+            self.assertFalse(epub_file.exists())
+            self.assertFalse(txt_file.exists())
+
+            # 180화로 추가 rename (중복 없이 [180화]로 교체)
+            new_path2 = scrape_novel.rename_ongoing_file(new_path, 180, also_save_other=True)
+            expected_epub2 = tmp / "나 혼자만 레벨업 [180화].epub"
+            expected_txt2 = tmp / "나 혼자만 레벨업 [180화].txt"
+
+            self.assertEqual(new_path2, expected_epub2)
+            self.assertTrue(expected_epub2.exists())
+            self.assertTrue(expected_txt2.exists())
+            self.assertFalse(expected_epub.exists())
+            self.assertFalse(expected_txt.exists())
+
+            # 3. get_latest_done_episode 검증
+            nid = "99999"
+            novel_cache = tmp / nid
+            novel_cache.mkdir()
+            state_data = {
+                "done": {
+                    "ch_1": {"idx": 1},
+                    "ch_150": {"idx": 150},
+                    "ch_180": {"idx": 180},
+                }
+            }
+            (novel_cache / "state.json").write_text(json.dumps(state_data), encoding="utf-8")
+            latest_ep = scrape_novel.get_latest_done_episode(nid, cache_root=tmp)
+            self.assertEqual(latest_ep, 180)
 
 
 if __name__ == "__main__":
