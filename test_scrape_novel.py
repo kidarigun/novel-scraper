@@ -294,6 +294,62 @@ class ExtractBodyTests(unittest.TestCase):
         last_failed_idx = idx
         self.assertEqual(consecutive_fail, 3)
 
+    def test_ongoing_novels_crud(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            # 1. 초기 상태: 등록된 연재중 소설 없음
+            self.assertEqual(scrape_novel.get_ongoing_novels(tmp_root), [])
+            self.assertFalse(scrape_novel.is_ongoing_novel(63772, tmp_root))
+
+            # 2. 연재중 소설 등록
+            novel1 = {
+                "novel_id": "63772",
+                "title": "EX급 던전을 얻었다",
+                "url": "https://newtoki1.org/novel/63772",
+                "out_path": str(tmp_root / "EX급 던전을 얻었다.epub"),
+                "format": "epub",
+                "total": 383,
+            }
+            scrape_novel.save_ongoing_novel(novel1, tmp_root)
+            self.assertTrue(scrape_novel.is_ongoing_novel("63772", tmp_root))
+            ongoing = scrape_novel.get_ongoing_novels(tmp_root)
+            self.assertEqual(len(ongoing), 1)
+            self.assertEqual(ongoing[0]["title"], "EX급 던전을 얻었다")
+
+            # 3. 다른 소설 추가
+            novel2 = {
+                "novel_id": "12345",
+                "title": "테스트 소설",
+                "url": "https://newtoki1.org/novel/12345",
+                "out_path": str(tmp_root / "테스트 소설.txt"),
+                "format": "txt",
+                "total": 50,
+            }
+            scrape_novel.save_ongoing_novel(novel2, tmp_root)
+            self.assertTrue(scrape_novel.is_ongoing_novel("12345", tmp_root))
+            ongoing = scrape_novel.get_ongoing_novels(tmp_root)
+            self.assertEqual(len(ongoing), 2)
+            # 최신 등록/갱신순
+            self.assertEqual(ongoing[0]["novel_id"], "12345")
+
+            # 4. 기존 소설 갱신 (중복 생성 없이 최신 정보로 업데이트)
+            novel1_updated = dict(novel1, total=385)
+            scrape_novel.save_ongoing_novel(novel1_updated, tmp_root)
+            ongoing = scrape_novel.get_ongoing_novels(tmp_root)
+            self.assertEqual(len(ongoing), 2)
+            self.assertEqual(ongoing[0]["novel_id"], "63772")
+            self.assertEqual(ongoing[0]["total"], 385)
+
+            # 5. 소설 삭제 (완결 처리)
+            removed = scrape_novel.remove_ongoing_novel("12345", tmp_root)
+            self.assertTrue(removed)
+            self.assertFalse(scrape_novel.is_ongoing_novel("12345", tmp_root))
+            ongoing = scrape_novel.get_ongoing_novels(tmp_root)
+            self.assertEqual(len(ongoing), 1)
+            self.assertEqual(ongoing[0]["novel_id"], "63772")
+
 
 if __name__ == "__main__":
     unittest.main()

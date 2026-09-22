@@ -134,27 +134,40 @@ class ScraperGUI:
         ttk.Button(frm, text="이어서 수집", command=self.load_history_click).grid(
             row=0, column=2, sticky="e", **pad)
 
+        # 연재중 소설 (정기 업데이트 목록)
+        ttk.Label(frm, text="연재중 소설").grid(row=1, column=0, sticky="w", **pad)
+        self.ongoing_novels_map = {}
+        self.ongoing_var = tk.StringVar()
+        self.ongoing_cb = ttk.Combobox(frm, textvariable=self.ongoing_var, state="readonly")
+        self.ongoing_cb.grid(row=1, column=1, sticky="ew", **pad)
+        self.ongoing_cb.bind("<<ComboboxSelected>>", self.on_ongoing_selected)
+
+        ong_btns = ttk.Frame(frm)
+        ong_btns.grid(row=1, column=2, sticky="e", **pad)
+        ttk.Button(ong_btns, text="연재중 소설 업데이트", command=self.update_ongoing_click).pack(side="left", padx=(0, 6))
+        ttk.Button(ong_btns, text="목록에서 제거", command=self.remove_ongoing_click).pack(side="left")
+
         # URL
-        ttk.Label(frm, text="소설 목록 URL").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="소설 목록 URL").grid(row=2, column=0, sticky="w", **pad)
         self.url_var = tk.StringVar()
         self.url_entry = ttk.Entry(frm, textvariable=self.url_var)
-        self.url_entry.grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
+        self.url_entry.grid(row=2, column=1, columnspan=2, sticky="ew", **pad)
         self.url_entry.focus()
         self.url_entry.bind("<FocusOut>", self._on_url_entry_event)
         self.url_entry.bind("<Return>", self._on_url_entry_event)
 
         # 출력 파일
-        ttk.Label(frm, text="저장 파일").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="저장 파일").grid(row=3, column=0, sticky="w", **pad)
         default_out = str(self._default_downloads() / "소설.epub")
         self.out_var = tk.StringVar(value=default_out)
-        ttk.Entry(frm, textvariable=self.out_var).grid(row=2, column=1, sticky="ew", **pad)
+        ttk.Entry(frm, textvariable=self.out_var).grid(row=3, column=1, sticky="ew", **pad)
         ttk.Button(frm, text="찾아보기…", command=self.browse_out).grid(
-            row=2, column=2, sticky="e", **pad)
+            row=3, column=2, sticky="e", **pad)
 
         # 저장 포맷
         fmt_frm = ttk.Frame(frm)
-        fmt_frm.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
-        ttk.Label(frm, text="저장 포맷").grid(row=3, column=0, sticky="w", **pad)
+        fmt_frm.grid(row=4, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(frm, text="저장 포맷").grid(row=4, column=0, sticky="w", **pad)
         self.file_format = tk.StringVar(value="epub")
         ttk.Radiobutton(fmt_frm, text="EPUB 전자책 (.epub)", value="epub",
                         variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 16))
@@ -162,11 +175,14 @@ class ScraperGUI:
                         variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 16))
         self.also_save_other = tk.BooleanVar(value=False)
         ttk.Checkbutton(fmt_frm, text="TXT와 EPUB 둘 다 동시 생성",
-                        variable=self.also_save_other).pack(side="left")
+                        variable=self.also_save_other).pack(side="left", padx=(0, 20))
+        self.is_ongoing_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(fmt_frm, text="연재중 소설로 등록",
+                        variable=self.is_ongoing_var).pack(side="left")
 
         # 옵션들
         opt = ttk.LabelFrame(frm, text="옵션")
-        opt.grid(row=4, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
+        opt.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
         for c in range(6):
             opt.columnconfigure(c, weight=1)
 
@@ -209,11 +225,13 @@ class ScraperGUI:
 
         # 버튼
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        btns.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.start_btn = ttk.Button(btns, text="시작", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text="중지", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=8)
+        self.batch_update_btn = ttk.Button(btns, text="연재중 소설 업데이트", command=self.update_ongoing_click)
+        self.batch_update_btn.pack(side="left", padx=(0, 8))
         self.install_btn = ttk.Button(btns, text="브라우저 설치",
                                       command=self.install_browser_click)
         self.install_btn.pack(side="left")
@@ -221,23 +239,24 @@ class ScraperGUI:
 
         # 진행률
         self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        self.progress.grid(row=7, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.status_var = tk.StringVar(value="대기 중")
         ttk.Label(frm, textvariable=self.status_var).grid(
-            row=7, column=0, columnspan=3, sticky="w", padx=12)
+            row=8, column=0, columnspan=3, sticky="w", padx=12)
 
         # 로그
         self.log_txt = tk.Text(frm, height=13, wrap="word", state="disabled",
                                font=("Consolas", 13))
-        self.log_txt.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
-        frm.rowconfigure(8, weight=1)
+        self.log_txt.grid(row=9, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
+        frm.rowconfigure(9, weight=1)
         sb = ttk.Scrollbar(frm, command=self.log_txt.yview)
-        sb.grid(row=8, column=3, sticky="ns", pady=8)
+        sb.grid(row=9, column=3, sticky="ns", pady=8)
         self.log_txt["yscrollcommand"] = sb.set
 
         self._last_clipboard = ""
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_history_list()
+        self.refresh_ongoing_list()
         self.root.after(100, self._drain_queue)
         self.root.after(600, self._check_clipboard)
 
@@ -283,6 +302,171 @@ class ScraperGUI:
             return
         self.on_history_selected()
         self.start()
+
+    def refresh_ongoing_list(self):
+        novels = scrape_novel.get_ongoing_novels()
+        self.ongoing_novels_map.clear()
+        display_list = []
+        for n in novels:
+            clean_title = re.sub(r"[\r\n\t\s]+", " ", n.get("title") or "").strip()
+            total_str = f"{n.get('total')}화" if n.get("total") else ""
+            label = f"{clean_title} ({total_str})" if total_str else clean_title
+            self.ongoing_novels_map[label] = n
+            display_list.append(label)
+        self.ongoing_cb["values"] = display_list
+        if display_list:
+            if not self.ongoing_var.get() or self.ongoing_var.get() not in self.ongoing_novels_map:
+                self.ongoing_var.set(display_list[0])
+        else:
+            self.ongoing_var.set("")
+
+    def on_ongoing_selected(self, event=None):
+        label = self.ongoing_var.get()
+        item = self.ongoing_novels_map.get(label)
+        if item:
+            self.url_var.set(item["url"])
+            if item.get("out_path"):
+                self.out_var.set(item["out_path"])
+                p = Path(item["out_path"])
+                if p.suffix.lower() == ".epub":
+                    self.file_format.set("epub")
+                elif p.suffix.lower() == ".txt":
+                    self.file_format.set("txt")
+            if "also_save_other" in item:
+                self.also_save_other.set(bool(item["also_save_other"]))
+            self.is_ongoing_var.set(True)
+
+    def remove_ongoing_click(self):
+        label = self.ongoing_var.get()
+        if not label or label not in self.ongoing_novels_map:
+            messagebox.showinfo("선택 필요", "제거할 연재중 소설을 목록에서 선택하세요.")
+            return
+        item = self.ongoing_novels_map[label]
+        novel_title = item.get("title", label)
+        if messagebox.askyesno("연재중 목록에서 제거", f"'{novel_title}' 소설을 연재중 목록에서 제거할까요?\n(소설이 완결되었거나 더 이상 자동 업데이트를 원하지 않을 때 제거합니다. 기존에 저장된 파일은 그대로 보존됩니다.)"):
+            scrape_novel.remove_ongoing_novel(item.get("novel_id") or item.get("url"))
+            self.refresh_ongoing_list()
+            self._log(f"[*] 연재중 목록에서 제거 완료: {novel_title}")
+            if self.url_var.get().strip() == item.get("url", "").strip():
+                self.is_ongoing_var.set(False)
+            messagebox.showinfo("완료", f"'{novel_title}' 소설이 연재중 목록에서 제거되었습니다.")
+
+    def update_ongoing_click(self):
+        novels = scrape_novel.get_ongoing_novels()
+        if not novels:
+            messagebox.showinfo("목록 비어있음", "등록된 연재중 소설이 없습니다.\n소설을 다운로드할 때 '연재중 소설로 등록'을 체크하시면 이곳에 등록됩니다.")
+            return
+
+        titles = [n.get("title", "제목미상") for n in novels]
+        summary = "\n".join(f"• {t}" for t in titles[:10])
+        if len(titles) > 10:
+            summary += f"\n... 외 {len(titles) - 10}편"
+
+        if not messagebox.askyesno("연재중 소설 업데이트", f"등록된 연재중 소설 총 {len(novels)}편의 최신 연재분을 순차적으로 업데이트합니다:\n\n{summary}\n\n지금 시작할까요?"):
+            return
+
+        self.stop_event.clear()
+        self.start_btn["state"] = "disabled"
+        if hasattr(self, "batch_update_btn"):
+            self.batch_update_btn["state"] = "disabled"
+        self.stop_btn["state"] = "normal"
+        self.status_var.set("연재중 소설 일괄 업데이트 시작 중…")
+        self.progress["value"] = 0
+
+        common_params = dict(
+            min_delay=float(self.min_delay.get()),
+            max_delay=max(float(self.max_delay.get()), float(self.min_delay.get())),
+            limit=int(self.limit.get()),
+            proxy=self.proxy.get().strip() or None,
+            headful=bool(self.headful.get()),
+            solve_cf=bool(self.solve_cf.get()),
+        )
+        self.worker = threading.Thread(target=self._run_batch_update, args=(novels,), kwargs=common_params, daemon=True)
+        self.worker.start()
+
+    def _run_batch_update(self, novels, **common_params):
+        total_novels = len(novels)
+        success_count = 0
+        failed_novels = []
+
+        self._log("\n" + "=" * 50)
+        self._log(f"[*] 연재중 소설 일괄 업데이트 시작 (총 {total_novels}편)")
+        self._log("=" * 50)
+
+        for i, novel in enumerate(novels, start=1):
+            if self.stop_event.is_set():
+                self._log("[중지] 사용자에 의해 연재중 소설 업데이트가 중지되었습니다.")
+                break
+
+            title = novel.get("title") or f"소설_{novel.get('novel_id', i)}"
+            url = novel.get("url")
+            out_path = novel.get("out_path")
+            also_save_other = bool(novel.get("also_save_other", False))
+
+            self._log(f"\n[{i}/{total_novels}] '{title}' 업데이트 확인 중…")
+            self.status_var.set(f"[{i}/{total_novels}] {title} 업데이트 중…")
+
+            try:
+                path = scrape_novel.scrape(
+                    url, out_path=out_path,
+                    also_save_other=also_save_other,
+                    log=self._log, should_stop=self.stop_event.is_set,
+                    on_progress=self._progress,
+                    **common_params
+                )
+                success_count += 1
+                try:
+                    nid = scrape_novel.parse_novel_id(url)
+                    cache_dir = scrape_novel.CACHE_ROOT / nid
+                    state_file = cache_dir / "state.json"
+                    if state_file.exists():
+                        s_data = json.loads(state_file.read_text(encoding="utf-8"))
+                        novel["total"] = s_data.get("total", novel.get("total", 0))
+                        novel["title"] = s_data.get("title", title)
+                        scrape_novel.save_ongoing_novel(novel)
+                except Exception:
+                    pass
+            except (scrape_novel.QuotaError, scrape_novel.BlockedError) as e:
+                self._log(f"[열람 제한] '{title}' 작업 중 제한 발생: {e}")
+                failed_novels.append((title, str(e)))
+                if self.auto_quota_retry.get() and not self.stop_event.is_set():
+                    wait_secs = scrape_novel.seconds_until_midnight(target_minute=1)
+                    cur_h = wait_secs // 3600
+                    cur_m = (wait_secs % 3600) // 60
+                    self._log(f"[자동 재시도 모드] 일일 쿼터 리셋 시점(자정 00:01)까지 대기합니다. (약 {cur_h}시간 {cur_m}분 후 재개)")
+                    for s in range(wait_secs, 0, -1):
+                        if self.stop_event.is_set():
+                            break
+                        if s % 60 == 0 or s == wait_secs or s <= 10:
+                            h = s // 3600
+                            m = (s % 3600) // 60
+                            rem_str = f"{h}시간 {m}분" if h > 0 else f"{m}분 {s % 60}초"
+                            self.status_var.set(f"자정 쿼터 리셋 대기 중… {rem_str} 후 재개 (00:01)")
+                        import time
+                        time.sleep(1)
+                    if not self.stop_event.is_set():
+                        self._log(f"\n[*] 자정 리셋 완료. '{title}'부터 업데이트를 재개합니다!")
+                        return self._run_batch_update(novels[i-1:], **common_params)
+                break
+            except Exception as e:  # noqa: BLE001
+                self._log(f"[오류] '{title}' 업데이트 실패: {e}")
+                failed_novels.append((title, str(e)))
+
+        msg = f"\n[*] 연재중 소설 일괄 업데이트 완료! (성공: {success_count}/{total_novels}"
+        if failed_novels:
+            msg += f", 실패: {len(failed_novels)}편)"
+        else:
+            msg += ")"
+        self._log(msg)
+
+        batch_result = {
+            "ok": True,
+            "path": None,
+            "error": None,
+            "is_batch": True,
+            "summary": f"연재중 소설 {total_novels}편 중 {success_count}편 업데이트 완료" + (f"\n(실패: {len(failed_novels)}편)" if failed_novels else "")
+        }
+        self.log_q.put(("done", batch_result))
 
     # ---- helpers ----
     @staticmethod
@@ -338,6 +522,12 @@ class ScraperGUI:
                         self.out_var.set(out_file)
                         self.status_var.set("대기 중")
                         self._log(f"[*] 소설 제목 확인: {title} -> 저장 파일: {safe_name}{ext}")
+                        try:
+                            nid = scrape_novel.parse_novel_id(url)
+                            if scrape_novel.is_ongoing_novel(nid):
+                                self.is_ongoing_var.set(True)
+                        except Exception:
+                            pass
                         if self.auto_start_on_clipboard.get() and not (self.worker and self.worker.is_alive()):
                             self.start()
                 elif kind == "progress":
@@ -394,6 +584,8 @@ class ScraperGUI:
             if state_file.exists():
                 data = json.loads(state_file.read_text(encoding="utf-8"))
                 cached_title = data.get("title")
+            if scrape_novel.is_ongoing_novel(novel_id):
+                self.is_ongoing_var.set(True)
         except Exception:
             pass
 
@@ -429,9 +621,35 @@ class ScraperGUI:
 
         self.stop_event.clear()
         self.start_btn["state"] = "disabled"
+        if hasattr(self, "batch_update_btn"):
+            self.batch_update_btn["state"] = "disabled"
         self.stop_btn["state"] = "normal"
         self.status_var.set("시작 중…")
         self.progress["value"] = 0
+
+        is_ongoing = bool(self.is_ongoing_var.get())
+        if is_ongoing:
+            try:
+                nid = scrape_novel.parse_novel_id(url)
+                scrape_novel.save_ongoing_novel({
+                    "novel_id": nid,
+                    "title": Path(out).stem,
+                    "url": url,
+                    "out_path": out,
+                    "format": self.file_format.get(),
+                    "also_save_other": bool(self.also_save_other.get()),
+                })
+                self.refresh_ongoing_list()
+            except Exception:
+                pass
+        else:
+            try:
+                nid = scrape_novel.parse_novel_id(url)
+                if scrape_novel.is_ongoing_novel(nid):
+                    scrape_novel.remove_ongoing_novel(nid)
+                    self.refresh_ongoing_list()
+            except Exception:
+                pass
 
         params = dict(
             url=url, out_path=out,
@@ -442,6 +660,7 @@ class ScraperGUI:
             headful=bool(self.headful.get()),
             solve_cf=bool(self.solve_cf.get()),
             also_save_other=bool(self.also_save_other.get()),
+            is_ongoing=is_ongoing,
         )
         self.worker = threading.Thread(target=self._run, kwargs=params, daemon=True)
         self.worker.start()
@@ -460,6 +679,22 @@ class ScraperGUI:
             )
             result["ok"] = True
             result["path"] = path
+
+            # 연재중 소설 등록 갱신
+            if params.get("is_ongoing"):
+                try:
+                    nid = scrape_novel.parse_novel_id(params["url"])
+                    final_p = Path(path)
+                    scrape_novel.save_ongoing_novel({
+                        "novel_id": nid,
+                        "title": final_p.stem,
+                        "url": params["url"],
+                        "out_path": str(final_p),
+                        "format": "epub" if final_p.suffix.lower() == ".epub" else "txt",
+                        "also_save_other": bool(params.get("also_save_other", False)),
+                    })
+                except Exception:
+                    pass
         except (scrape_novel.QuotaError, scrape_novel.BlockedError) as e:
             if self.auto_quota_retry.get() and not self.stop_event.is_set():
                 import time
@@ -491,8 +726,14 @@ class ScraperGUI:
     def _on_finished(self, result):
         self.start_btn["state"] = "normal"
         self.stop_btn["state"] = "disabled"
+        if hasattr(self, "batch_update_btn"):
+            self.batch_update_btn["state"] = "normal"
         self.refresh_history_list()
-        if result["ok"]:
+        self.refresh_ongoing_list()
+        if result.get("is_batch"):
+            self.status_var.set("연재중 업데이트 완료")
+            messagebox.showinfo("업데이트 완료", result.get("summary", "연재중 소설 업데이트가 완료되었습니다."))
+        elif result["ok"]:
             self.status_var.set("완료")
             if messagebox.askyesno("완료", f"저장 완료:\n{result['path']}\n\n폴더를 열까요?"):
                 self._open_folder(result["path"])

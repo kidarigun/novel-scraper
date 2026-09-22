@@ -1044,6 +1044,68 @@ def get_cached_novels(cache_root=None):
     return results
 
 
+def _ongoing_file(cache_root=None):
+    root = Path(cache_root) if cache_root else CACHE_ROOT
+    return root / "ongoing_novels.json"
+
+
+def get_ongoing_novels(cache_root=None):
+    """연재중으로 등록된 소설 목록을 반환 (최신 갱신순)."""
+    f = _ongoing_file(cache_root)
+    if not f.exists():
+        return []
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        novels = data.get("novels", [])
+        if isinstance(novels, list):
+            novels.sort(key=lambda x: x.get("updated_at", 0), reverse=True)
+            return novels
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def save_ongoing_novel(novel_info, cache_root=None):
+    """연재중 소설 추가 또는 갱신."""
+    f = _ongoing_file(cache_root)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    novels = get_ongoing_novels(cache_root)
+    nid = str(novel_info.get("novel_id") or "")
+    if not nid and novel_info.get("url"):
+        try:
+            nid = parse_novel_id(novel_info["url"])
+        except Exception:
+            nid = ""
+    novel_info["novel_id"] = nid
+    novel_info["updated_at"] = time.time()
+
+    # 중복 제거 및 최신 순 갱신
+    new_list = [n for n in novels if str(n.get("novel_id")) != nid]
+    new_list.insert(0, novel_info)
+    f.write_text(json.dumps({"novels": new_list}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def remove_ongoing_novel(novel_id, cache_root=None):
+    """연재중 소설 목록에서 삭제 (완결 처리)."""
+    f = _ongoing_file(cache_root)
+    if not f.exists():
+        return False
+    novels = get_ongoing_novels(cache_root)
+    nid = str(novel_id)
+    new_list = [n for n in novels if str(n.get("novel_id")) != nid]
+    if len(new_list) == len(novels):
+        return False
+    f.write_text(json.dumps({"novels": new_list}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
+
+
+def is_ongoing_novel(novel_id, cache_root=None):
+    """특정 소설이 연재중으로 등록되어 있는지 여부 반환."""
+    novels = get_ongoing_novels(cache_root)
+    nid = str(novel_id)
+    return any(str(n.get("novel_id")) == nid for n in novels)
+
+
 def _load_state(path):
     if path.exists():
         try:
