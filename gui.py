@@ -166,15 +166,13 @@ class ScraperGUI:
         fmt_frm.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
         ttk.Label(frm, text="저장 포맷").grid(row=3, column=0, sticky="w", **pad)
         self.file_format = tk.StringVar(value="epub")
-        ttk.Radiobutton(fmt_frm, text="EPUB 전자책 (.epub)", value="epub",
-                        variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 16))
-        ttk.Radiobutton(fmt_frm, text="텍스트 (.txt)", value="txt",
-                        variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 16))
+        ttk.Radiobutton(fmt_frm, text="EPUB", value="epub",
+                        variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(fmt_frm, text="TEXT", value="txt",
+                        variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 24))
         self.also_save_other = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fmt_frm, text="TXT와 EPUB 둘 다 동시 생성",
-                        variable=self.also_save_other).pack(side="left", padx=(0, 20))
         self.is_ongoing_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fmt_frm, text="연재중 소설로 등록",
+        ttk.Checkbutton(fmt_frm, text="연재 소설로 등록",
                         variable=self.is_ongoing_var).pack(side="left")
 
         # 옵션들
@@ -214,7 +212,7 @@ class ScraperGUI:
             row=1, column=5, sticky="w", padx=8)
 
         self.auto_clipboard = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt, text="클립보드 URL 자동 감지 및 파일명 설정", variable=self.auto_clipboard).grid(
+        ttk.Checkbutton(opt, text="클립보드 자동 감지", variable=self.auto_clipboard).grid(
             row=2, column=0, columnspan=3, sticky="w", padx=8, pady=4)
         self.auto_start_on_clipboard = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="감지 시 즉시 스크랩 시작", variable=self.auto_start_on_clipboard).grid(
@@ -943,8 +941,7 @@ class ScraperGUI:
         add_subbullet("프로그램이 클립보드를 실시간 감지하여 소설 제목 확인 및 저장 파일명을 자동으로 채웁니다.")
         add_subbullet("수동 입력 시 '소설 목록 URL' 칸에 붙여넣고 Enter 또는 다른 곳을 클릭하세요.")
         add_bullet("2단계: 저장 포맷 선택", "")
-        add_subbullet("EPUB 전자책(.epub) 또는 텍스트(.txt) 포맷을 선택합니다.")
-        add_subbullet("'TXT와 EPUB 둘 다 동시 생성'을 체크하면 두 포맷을 한 번에 생성합니다.")
+        add_subbullet("EPUB 또는 TEXT 포맷을 선택합니다.")
         add_bullet("3단계: 수집 시작", "")
         add_subbullet("[시작] 버튼을 누르면 브라우저를 통해 본문 수집이 진행됩니다.")
         add_subbullet("사이트에 표지 이미지가 있는 경우 전자책(EPUB) 표지로 자동 포함됩니다.")
@@ -955,13 +952,13 @@ class ScraperGUI:
         add_subbullet("상단의 '이전 수집 이력' 목록에서 해당 소설을 선택하고 [이어서 수집]을 누릅니다.")
         add_subbullet("이미 수집 완료된 회차는 자동으로 건너뛰고, 남은 회차만 고속으로 이어서 다운로드합니다.")
 
-        add_h1("3. 연재중 소설 관리 및 자동 업데이트")
-        add_bullet("[연재중 소설로 등록] 체크", "")
+        add_h1("3. 연재 소설 관리 및 자동 업데이트")
+        add_bullet("[연재 소설로 등록] 체크", "")
         add_subbullet("소설을 다운로드할 때 체크하면 우측의 「연재중 소설 목록」에 자동 보관됩니다.")
         add_bullet("우측 패널 기능 활용", "")
         add_subbullet("소설 선택/더블클릭: 목록에서 소설을 클릭하면 해당 소설의 설정이 입력창에 즉시 로드됩니다.")
         add_subbullet("[선택 소설 업데이트]: 선택한 소설의 최신 연재분만 즉시 이어받습니다.")
-        add_subbullet("[전체 연재작 업데이트]: 등록된 모든 연재작을 순차적으로 일괄 업데이트합니다.")
+        add_subbullet("[전체 연재작 업데이트]: 등록된 모든 연재 소설을 순차적으로 일괄 업데이트합니다.")
         add_subbullet("[선택 소설 목록에서 제거]: 완결되었거나 더 이상 업데이트를 확인하지 않을 소설을 목록에서 제외합니다.")
         add_bullet("최종화 번호 자동 반영 (파일명 자동 변경)", "")
         add_subbullet("수집 또는 업데이트 완료 시 파일명 끝에 자동으로 최신 화수 번호가 붙습니다.")
@@ -973,7 +970,7 @@ class ScraperGUI:
         add_bullet("개수 제한(0=전체)", "0은 전체 완결/최신화까지 수집하며, 특정 숫자 입력 시 해당 화수만큼만 수집합니다.")
         add_bullet("창 표시 / CF 우회", "Cloudflare 보안 검사나 캡차가 뜨는 사이트인 경우 활성화합니다.")
         add_bullet("쿼터시 자정(0시)후 자동재시도", "일일 열람 제한에 도달했을 때 켜두면, 자정(00:01)에 자동으로 풀리는 시점을 기다려 수집을 재개합니다.")
-        add_bullet("클립보드 URL 자동 감지", "브라우저에서 주소 복사 시 자동으로 가져오는 편리 기능입니다.")
+        add_bullet("클립보드 자동 감지", "브라우저에서 주소 복사 시 자동으로 가져오는 편리 기능입니다.")
 
         add_h1("5. 문제 해결 및 팁")
         add_bullet("Q. 본문이 비어 있는 게시물이 있어요.", "")
