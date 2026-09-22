@@ -101,8 +101,8 @@ class ScraperGUI:
     def __init__(self, root):
         self.root = root
         root.title("연재 소설 스크래퍼")
-        root.geometry("1020x760")
-        root.minsize(880, 600)
+        root.geometry("1300x820")
+        root.minsize(1050, 640)
 
         # 텍스트 크기 1.5배 확대 (기본 9pt -> 14pt)
         for font_name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
@@ -114,15 +114,25 @@ class ScraperGUI:
         self.style = ttk.Style()
         self.style.configure(".", font=("맑은 고딕", 14))
         self.style.configure("TLabelframe.Label", font=("맑은 고딕", 14, "bold"))
+        self.style.configure("Treeview", font=("맑은 고딕", 11), rowheight=30)
+        self.style.configure("Treeview.Heading", font=("맑은 고딕", 12, "bold"))
 
         self.log_q = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = None
 
-        pad = {"padx": 12, "pady": 6}
-        frm = ttk.Frame(root)
-        frm.pack(fill="both", expand=True)
+        # 메인 가로 분할 (좌: 메인 작업창, 우: 펼쳐진 연재 소설 목록)
+        main_pane = ttk.PanedWindow(root, orient="horizontal")
+        main_pane.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # -------------------------------------------------------------
+        # 좌측 프레임: 메인 스크래퍼 작업 영역
+        # -------------------------------------------------------------
+        frm = ttk.Frame(main_pane)
+        main_pane.add(frm, weight=3)
         frm.columnconfigure(1, weight=1)
+
+        pad = {"padx": 12, "pady": 6}
 
         # 최근 수집 이력 (이어받기)
         ttk.Label(frm, text="이전 수집 이력").grid(row=0, column=0, sticky="w", **pad)
@@ -134,40 +144,27 @@ class ScraperGUI:
         ttk.Button(frm, text="이어서 수집", command=self.load_history_click).grid(
             row=0, column=2, sticky="e", **pad)
 
-        # 연재중 소설 (정기 업데이트 목록)
-        ttk.Label(frm, text="연재중 소설").grid(row=1, column=0, sticky="w", **pad)
-        self.ongoing_novels_map = {}
-        self.ongoing_var = tk.StringVar()
-        self.ongoing_cb = ttk.Combobox(frm, textvariable=self.ongoing_var, state="readonly")
-        self.ongoing_cb.grid(row=1, column=1, sticky="ew", **pad)
-        self.ongoing_cb.bind("<<ComboboxSelected>>", self.on_ongoing_selected)
-
-        ong_btns = ttk.Frame(frm)
-        ong_btns.grid(row=1, column=2, sticky="e", **pad)
-        ttk.Button(ong_btns, text="연재중 소설 업데이트", command=self.update_ongoing_click).pack(side="left", padx=(0, 6))
-        ttk.Button(ong_btns, text="목록에서 제거", command=self.remove_ongoing_click).pack(side="left")
-
         # URL
-        ttk.Label(frm, text="소설 목록 URL").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="소설 목록 URL").grid(row=1, column=0, sticky="w", **pad)
         self.url_var = tk.StringVar()
         self.url_entry = ttk.Entry(frm, textvariable=self.url_var)
-        self.url_entry.grid(row=2, column=1, columnspan=2, sticky="ew", **pad)
+        self.url_entry.grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
         self.url_entry.focus()
         self.url_entry.bind("<FocusOut>", self._on_url_entry_event)
         self.url_entry.bind("<Return>", self._on_url_entry_event)
 
         # 출력 파일
-        ttk.Label(frm, text="저장 파일").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="저장 파일").grid(row=2, column=0, sticky="w", **pad)
         default_out = str(self._default_downloads() / "소설.epub")
         self.out_var = tk.StringVar(value=default_out)
-        ttk.Entry(frm, textvariable=self.out_var).grid(row=3, column=1, sticky="ew", **pad)
+        ttk.Entry(frm, textvariable=self.out_var).grid(row=2, column=1, sticky="ew", **pad)
         ttk.Button(frm, text="찾아보기…", command=self.browse_out).grid(
-            row=3, column=2, sticky="e", **pad)
+            row=2, column=2, sticky="e", **pad)
 
         # 저장 포맷
         fmt_frm = ttk.Frame(frm)
-        fmt_frm.grid(row=4, column=1, columnspan=2, sticky="w", **pad)
-        ttk.Label(frm, text="저장 포맷").grid(row=4, column=0, sticky="w", **pad)
+        fmt_frm.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(frm, text="저장 포맷").grid(row=3, column=0, sticky="w", **pad)
         self.file_format = tk.StringVar(value="epub")
         ttk.Radiobutton(fmt_frm, text="EPUB 전자책 (.epub)", value="epub",
                         variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 16))
@@ -176,13 +173,13 @@ class ScraperGUI:
         self.also_save_other = tk.BooleanVar(value=False)
         ttk.Checkbutton(fmt_frm, text="TXT와 EPUB 둘 다 동시 생성",
                         variable=self.also_save_other).pack(side="left", padx=(0, 20))
-        self.is_ongoing_var = tk.BooleanVar(value=True)
+        self.is_ongoing_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(fmt_frm, text="연재중 소설로 등록",
                         variable=self.is_ongoing_var).pack(side="left")
 
         # 옵션들
         opt = ttk.LabelFrame(frm, text="옵션")
-        opt.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
+        opt.grid(row=4, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
         for c in range(6):
             opt.columnconfigure(c, weight=1)
 
@@ -225,7 +222,7 @@ class ScraperGUI:
 
         # 버튼
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        btns.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.start_btn = ttk.Button(btns, text="시작", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text="중지", command=self.stop, state="disabled")
@@ -239,19 +236,66 @@ class ScraperGUI:
 
         # 진행률
         self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=7, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        self.progress.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.status_var = tk.StringVar(value="대기 중")
         ttk.Label(frm, textvariable=self.status_var).grid(
-            row=8, column=0, columnspan=3, sticky="w", padx=12)
+            row=7, column=0, columnspan=3, sticky="w", padx=12)
 
         # 로그
         self.log_txt = tk.Text(frm, height=13, wrap="word", state="disabled",
                                font=("Consolas", 13))
-        self.log_txt.grid(row=9, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
-        frm.rowconfigure(9, weight=1)
+        self.log_txt.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
+        frm.rowconfigure(8, weight=1)
         sb = ttk.Scrollbar(frm, command=self.log_txt.yview)
-        sb.grid(row=9, column=3, sticky="ns", pady=8)
+        sb.grid(row=8, column=3, sticky="ns", pady=8)
         self.log_txt["yscrollcommand"] = sb.set
+
+        # -------------------------------------------------------------
+        # 우측 프레임: 펼쳐진 연재중 소설 목록
+        # -------------------------------------------------------------
+        right_frm = ttk.LabelFrame(main_pane, text=" 연재중 소설 목록 ", padding=10)
+        main_pane.add(right_frm, weight=1)
+
+        top_ong_frm = ttk.Frame(right_frm)
+        top_ong_frm.pack(fill="x", pady=(0, 6))
+        self.ongoing_count_lbl = ttk.Label(top_ong_frm, text="등록된 소설: 0편", font=("맑은 고딕", 12, "bold"))
+        self.ongoing_count_lbl.pack(side="left")
+        ttk.Button(top_ong_frm, text="새로고침", command=self.refresh_ongoing_list, width=8).pack(side="right")
+
+        tree_frm = ttk.Frame(right_frm)
+        tree_frm.pack(fill="both", expand=True)
+
+        columns = ("title", "total", "fmt")
+        self.ongoing_tree = ttk.Treeview(tree_frm, columns=columns, show="headings", selectmode="browse")
+        self.ongoing_tree.heading("title", text="소설 제목")
+        self.ongoing_tree.heading("total", text="회차")
+        self.ongoing_tree.heading("fmt", text="포맷")
+
+        self.ongoing_tree.column("title", width=190, minwidth=110, anchor="w")
+        self.ongoing_tree.column("total", width=65, minwidth=50, anchor="center")
+        self.ongoing_tree.column("fmt", width=55, minwidth=45, anchor="center")
+
+        tree_sb = ttk.Scrollbar(tree_frm, orient="vertical", command=self.ongoing_tree.yview)
+        self.ongoing_tree.configure(yscrollcommand=tree_sb.set)
+
+        self.ongoing_tree.pack(side="left", fill="both", expand=True)
+        tree_sb.pack(side="right", fill="y")
+
+        self.ongoing_tree.bind("<<TreeviewSelect>>", self.on_ongoing_tree_selected)
+        self.ongoing_tree.bind("<Double-1>", self.on_ongoing_tree_double_click)
+
+        ttk.Label(right_frm, text="※ 소설을 선택하면 입력창에 자동 로드됩니다.",
+                  font=("맑은 고딕", 10), foreground="#666666").pack(anchor="w", pady=(6, 6))
+
+        ong_btn_frm = ttk.Frame(right_frm)
+        ong_btn_frm.pack(fill="x", pady=(4, 0))
+
+        ttk.Button(ong_btn_frm, text="선택 소설 불러오기", command=self.load_selected_ongoing).pack(fill="x", pady=2)
+        ttk.Button(ong_btn_frm, text="선택 소설 업데이트", command=self.update_selected_ongoing_click).pack(fill="x", pady=2)
+        ttk.Button(ong_btn_frm, text="전체 연재작 업데이트", command=self.update_ongoing_click).pack(fill="x", pady=2)
+        ttk.Button(ong_btn_frm, text="선택 소설 목록에서 제거", command=self.remove_ongoing_click).pack(fill="x", pady=2)
+
+        self.ongoing_items_map = {}
 
         self._last_clipboard = ""
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -305,44 +349,79 @@ class ScraperGUI:
 
     def refresh_ongoing_list(self):
         novels = scrape_novel.get_ongoing_novels()
-        self.ongoing_novels_map.clear()
-        display_list = []
+        self.ongoing_items_map = {}
+        if hasattr(self, "ongoing_tree"):
+            for item in self.ongoing_tree.get_children():
+                self.ongoing_tree.delete(item)
+
+        if hasattr(self, "ongoing_count_lbl"):
+            self.ongoing_count_lbl.config(text=f"등록된 소설: {len(novels)}편")
+
         for n in novels:
             clean_title = re.sub(r"[\r\n\t\s]+", " ", n.get("title") or "").strip()
-            total_str = f"{n.get('total')}화" if n.get("total") else ""
-            label = f"{clean_title} ({total_str})" if total_str else clean_title
-            self.ongoing_novels_map[label] = n
-            display_list.append(label)
-        self.ongoing_cb["values"] = display_list
-        if display_list:
-            if not self.ongoing_var.get() or self.ongoing_var.get() not in self.ongoing_novels_map:
-                self.ongoing_var.set(display_list[0])
-        else:
-            self.ongoing_var.set("")
+            total_str = f"{n.get('total')}화" if n.get("total") else "-"
+            fmt_str = (n.get("format") or "epub").upper()
+            if hasattr(self, "ongoing_tree"):
+                item_id = self.ongoing_tree.insert("", "end", values=(clean_title, total_str, fmt_str))
+                self.ongoing_items_map[item_id] = n
 
-    def on_ongoing_selected(self, event=None):
-        label = self.ongoing_var.get()
-        item = self.ongoing_novels_map.get(label)
+    def _get_selected_ongoing_novel(self):
+        if not hasattr(self, "ongoing_tree"):
+            return None
+        selected = self.ongoing_tree.selection()
+        if not selected:
+            return None
+        return self.ongoing_items_map.get(selected[0])
+
+    def on_ongoing_tree_selected(self, event=None):
+        item = self._get_selected_ongoing_novel()
         if item:
-            self.url_var.set(item["url"])
-            if item.get("out_path"):
-                self.out_var.set(item["out_path"])
-                p = Path(item["out_path"])
-                if p.suffix.lower() == ".epub":
-                    self.file_format.set("epub")
-                elif p.suffix.lower() == ".txt":
-                    self.file_format.set("txt")
-            if "also_save_other" in item:
-                self.also_save_other.set(bool(item["also_save_other"]))
-            self.is_ongoing_var.set(True)
+            self._apply_novel_info(item)
+
+    def on_ongoing_tree_double_click(self, event=None):
+        item = self._get_selected_ongoing_novel()
+        if item:
+            self._apply_novel_info(item)
+            self._log(f"[*] 연재중 소설 로드 완료: {item.get('title')}")
+
+    def load_selected_ongoing(self):
+        item = self._get_selected_ongoing_novel()
+        if not item:
+            messagebox.showinfo("선택 필요", "불러올 연재중 소설을 목록에서 선택하세요.")
+            return
+        self._apply_novel_info(item)
+        messagebox.showinfo("로드 완료", f"'{item.get('title')}' 소설 설정이 입력창에 로드되었습니다.")
+
+    def _apply_novel_info(self, item):
+        self.url_var.set(item.get("url", ""))
+        if item.get("out_path"):
+            self.out_var.set(item["out_path"])
+            p = Path(item["out_path"])
+            if p.suffix.lower() == ".epub":
+                self.file_format.set("epub")
+            elif p.suffix.lower() == ".txt":
+                self.file_format.set("txt")
+        if "also_save_other" in item:
+            self.also_save_other.set(bool(item["also_save_other"]))
+        self.is_ongoing_var.set(True)
+
+    def update_selected_ongoing_click(self):
+        item = self._get_selected_ongoing_novel()
+        if not item:
+            messagebox.showinfo("선택 필요", "업데이트할 연재중 소설을 목록에서 선택하세요.")
+            return
+        self._apply_novel_info(item)
+        novel_title = item.get("title", "선택된 소설")
+        if not messagebox.askyesno("소설 업데이트", f"'{novel_title}' 소설의 최신 연재분을 업데이트할까요?"):
+            return
+        self.start()
 
     def remove_ongoing_click(self):
-        label = self.ongoing_var.get()
-        if not label or label not in self.ongoing_novels_map:
+        item = self._get_selected_ongoing_novel()
+        if not item:
             messagebox.showinfo("선택 필요", "제거할 연재중 소설을 목록에서 선택하세요.")
             return
-        item = self.ongoing_novels_map[label]
-        novel_title = item.get("title", label)
+        novel_title = item.get("title", "선택된 소설")
         if messagebox.askyesno("연재중 목록에서 제거", f"'{novel_title}' 소설을 연재중 목록에서 제거할까요?\n(소설이 완결되었거나 더 이상 자동 업데이트를 원하지 않을 때 제거합니다. 기존에 저장된 파일은 그대로 보존됩니다.)"):
             scrape_novel.remove_ongoing_novel(item.get("novel_id") or item.get("url"))
             self.refresh_ongoing_list()
@@ -586,6 +665,8 @@ class ScraperGUI:
                 cached_title = data.get("title")
             if scrape_novel.is_ongoing_novel(novel_id):
                 self.is_ongoing_var.set(True)
+            else:
+                self.is_ongoing_var.set(False)
         except Exception:
             pass
 
