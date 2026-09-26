@@ -1044,6 +1044,84 @@ def get_cached_novels(cache_root=None):
     return results
 
 
+def _settings_file(cache_root=None):
+    root = Path(cache_root) if cache_root else CACHE_ROOT
+    return root / "settings.json"
+
+
+def get_settings(cache_root=None):
+    """프로그램 전역 설정 로드."""
+    f = _settings_file(cache_root)
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_settings(new_settings, cache_root=None):
+    """프로그램 전역 설정 저장 (기존 설정 병합)."""
+    f = _settings_file(cache_root)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    cur = get_settings(cache_root)
+    cur.update(new_settings)
+    f.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+    return cur
+
+
+def get_default_download_dir(cache_root=None):
+    """기본 다운로드 폴더 반환 (설정된 폴더가 유효하면 우선 사용)."""
+    settings = get_settings(cache_root)
+    saved_dir = settings.get("download_dir")
+    if saved_dir:
+        p = Path(saved_dir)
+        try:
+            if p.exists() and p.is_dir():
+                return p
+        except Exception:
+            pass
+    d = Path.home() / "Downloads"
+    return d if d.exists() else Path.home()
+
+
+def detect_google_drive_dir():
+    """시스템에 연결된 구글 드라이브 폴더 후보를 탐색하여 존재하는 첫 번째 경로 반환."""
+    # 1. 알파벳 드라이브 탐색 (G: 등)
+    drive_candidates = ["G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "D", "E"]
+    subdirs = ["내 드라이브", "My Drive"]
+    for letter in drive_candidates:
+        drv = Path(f"{letter}:/")
+        try:
+            if drv.exists():
+                for sub in subdirs:
+                    target = drv / sub
+                    if target.exists() and target.is_dir():
+                        return target
+                if letter == "G":
+                    return drv
+        except Exception:
+            continue
+
+    # 2. 사용자 홈 폴더 내 구글 드라이브 탐색
+    home = Path.home()
+    user_candidates = [
+        home / "Google Drive" / "내 드라이브",
+        home / "Google Drive" / "My Drive",
+        home / "Google Drive",
+        home / "GoogleDrive",
+        home / "내 드라이브",
+    ]
+    for c in user_candidates:
+        try:
+            if c.exists() and c.is_dir():
+                return c
+        except Exception:
+            continue
+
+    return None
+
+
 def _ongoing_file(cache_root=None):
     root = Path(cache_root) if cache_root else CACHE_ROOT
     return root / "ongoing_novels.json"

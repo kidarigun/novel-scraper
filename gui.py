@@ -153,18 +153,31 @@ class ScraperGUI:
         self.url_entry.bind("<FocusOut>", self._on_url_entry_event)
         self.url_entry.bind("<Return>", self._on_url_entry_event)
 
+        # 기본 저장 폴더
+        ttk.Label(frm, text="기본 저장 폴더").grid(row=2, column=0, sticky="w", **pad)
+        self.download_dir_var = tk.StringVar(value=str(scrape_novel.get_default_download_dir()))
+        self.dir_entry = ttk.Entry(frm, textvariable=self.download_dir_var)
+        self.dir_entry.grid(row=2, column=1, sticky="ew", **pad)
+        self.dir_entry.bind("<FocusOut>", self._on_dir_entry_change)
+        self.dir_entry.bind("<Return>", self._on_dir_entry_change)
+
+        dir_btns = ttk.Frame(frm)
+        dir_btns.grid(row=2, column=2, sticky="e", **pad)
+        ttk.Button(dir_btns, text="폴더 변경…", command=self.browse_dir).pack(side="left", padx=(0, 6))
+        ttk.Button(dir_btns, text="구글 드라이브", command=self.set_google_drive_dir).pack(side="left")
+
         # 출력 파일
-        ttk.Label(frm, text="저장 파일").grid(row=2, column=0, sticky="w", **pad)
-        default_out = str(self._default_downloads() / "소설.epub")
+        ttk.Label(frm, text="저장 파일").grid(row=3, column=0, sticky="w", **pad)
+        default_out = str(self.get_current_download_dir() / "소설.epub")
         self.out_var = tk.StringVar(value=default_out)
-        ttk.Entry(frm, textvariable=self.out_var).grid(row=2, column=1, sticky="ew", **pad)
+        ttk.Entry(frm, textvariable=self.out_var).grid(row=3, column=1, sticky="ew", **pad)
         ttk.Button(frm, text="찾아보기…", command=self.browse_out).grid(
-            row=2, column=2, sticky="e", **pad)
+            row=3, column=2, sticky="e", **pad)
 
         # 저장 포맷
         fmt_frm = ttk.Frame(frm)
-        fmt_frm.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
-        ttk.Label(frm, text="저장 포맷").grid(row=3, column=0, sticky="w", **pad)
+        fmt_frm.grid(row=4, column=1, columnspan=2, sticky="w", **pad)
+        ttk.Label(frm, text="저장 포맷").grid(row=4, column=0, sticky="w", **pad)
         self.file_format = tk.StringVar(value="epub")
         ttk.Radiobutton(fmt_frm, text="EPUB", value="epub",
                         variable=self.file_format, command=self._on_format_changed).pack(side="left", padx=(0, 20))
@@ -177,7 +190,7 @@ class ScraperGUI:
 
         # 옵션들
         opt = ttk.LabelFrame(frm, text="옵션")
-        opt.grid(row=4, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
+        opt.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=10)
         for c in range(6):
             opt.columnconfigure(c, weight=1)
 
@@ -220,7 +233,7 @@ class ScraperGUI:
 
         # 버튼
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        btns.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.start_btn = ttk.Button(btns, text="시작", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(btns, text="중지", command=self.stop, state="disabled")
@@ -234,18 +247,18 @@ class ScraperGUI:
 
         # 진행률
         self.progress = ttk.Progressbar(frm, mode="determinate")
-        self.progress.grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
+        self.progress.grid(row=7, column=0, columnspan=3, sticky="ew", padx=12, pady=8)
         self.status_var = tk.StringVar(value="대기 중")
         ttk.Label(frm, textvariable=self.status_var).grid(
-            row=7, column=0, columnspan=3, sticky="w", padx=12)
+            row=8, column=0, columnspan=3, sticky="w", padx=12)
 
         # 로그
         self.log_txt = tk.Text(frm, height=13, wrap="word", state="disabled",
                                font=("Consolas", 13))
-        self.log_txt.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
-        frm.rowconfigure(8, weight=1)
+        self.log_txt.grid(row=9, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
+        frm.rowconfigure(9, weight=1)
         sb = ttk.Scrollbar(frm, command=self.log_txt.yview)
-        sb.grid(row=8, column=3, sticky="ns", pady=8)
+        sb.grid(row=9, column=3, sticky="ns", pady=8)
         self.log_txt["yscrollcommand"] = sb.set
 
         # -------------------------------------------------------------
@@ -337,7 +350,7 @@ class ScraperGUI:
             self.url_var.set(item["url"])
             safe_name = scrape_novel._safe_filename(item["title"])
             ext = ".epub" if self.file_format.get() == "epub" else ".txt"
-            out_file = str(self._default_downloads() / f"{safe_name}{ext}")
+            out_file = str(self.get_current_download_dir() / f"{safe_name}{ext}")
             out_file = re.sub(r"[\r\n\t]+", "", out_file)
             self.out_var.set(out_file)
 
@@ -556,14 +569,82 @@ class ScraperGUI:
         self.log_q.put(("done", batch_result))
 
     # ---- helpers ----
+    def get_current_download_dir(self):
+        if hasattr(self, "download_dir_var"):
+            d = self.download_dir_var.get().strip()
+            if d:
+                p = Path(d)
+                try:
+                    if p.exists() and p.is_dir():
+                        return p
+                except Exception:
+                    pass
+        return scrape_novel.get_default_download_dir()
+
     @staticmethod
     def _default_downloads():
-        d = Path.home() / "Downloads"
-        return d if d.exists() else Path.home()
+        return scrape_novel.get_default_download_dir()
+
+    def _on_dir_entry_change(self, event=None):
+        raw = self.download_dir_var.get().strip()
+        if raw:
+            p = Path(raw)
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+                self.set_download_dir(str(p))
+            except Exception:
+                pass
+
+    def set_download_dir(self, folder):
+        p = Path(folder)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        self.download_dir_var.set(str(p))
+        scrape_novel.save_settings({"download_dir": str(p)})
+        self._log(f"[*] 기본 저장 폴더 설정: {p}")
+
+        # 현재 지정된 파일명을 새 폴더 경로로 갱신
+        cur_out = self.out_var.get().strip()
+        if cur_out:
+            file_name = Path(cur_out).name
+        else:
+            ext = ".epub" if self.file_format.get() == "epub" else ".txt"
+            file_name = f"소설{ext}"
+        self.out_var.set(str(p / file_name))
+
+    def browse_dir(self):
+        init_dir = str(self.get_current_download_dir())
+        folder = filedialog.askdirectory(
+            title="기본 저장 폴더 선택 (구글 드라이브 폴더 가능)",
+            initialdir=init_dir
+        )
+        if folder:
+            self.set_download_dir(folder)
+
+    def set_google_drive_dir(self):
+        gdrive = scrape_novel.detect_google_drive_dir()
+        if gdrive and gdrive.exists():
+            self.set_download_dir(str(gdrive))
+            messagebox.showinfo(
+                "구글 드라이브 설정 완료",
+                f"기본 저장 폴더가 구글 드라이브로 설정되었습니다:\n\n{gdrive}"
+            )
+        else:
+            if messagebox.askyesno(
+                "구글 드라이브 폴더 선택",
+                "구글 드라이브 기본 위치가 자동으로 감지되지 않았습니다.\n"
+                "(Google Drive 데스크톱 앱이 실행 중이어야 합니다)\n\n"
+                "탐색기에서 직접 구글 드라이브 폴더(예: G:\\내 드라이브)를 선택하시겠습니까?"
+            ):
+                folder = filedialog.askdirectory(title="구글 드라이브 폴더를 선택하세요")
+                if folder:
+                    self.set_download_dir(folder)
 
     def browse_out(self):
         ext = ".epub" if self.file_format.get() == "epub" else ".txt"
-        init = Path(self.out_var.get() or (self._default_downloads() / f"소설{ext}"))
+        init = Path(self.out_var.get() or (self.get_current_download_dir() / f"소설{ext}"))
         ftypes = [("EPUB 전자책", "*.epub"), ("텍스트 파일", "*.txt"), ("모든 파일", "*.*")] if ext == ".epub" else [("텍스트 파일", "*.txt"), ("EPUB 전자책", "*.epub"), ("모든 파일", "*.*")]
         path = filedialog.asksaveasfilename(
             title="저장 위치와 파일 이름 선택",
@@ -604,7 +685,7 @@ class ScraperGUI:
                     if self.url_var.get() == url:
                         safe_name = scrape_novel._safe_filename(title)
                         ext = ".epub" if self.file_format.get() == "epub" else ".txt"
-                        out_file = str(self._default_downloads() / f"{safe_name}{ext}")
+                        out_file = str(self.get_current_download_dir() / f"{safe_name}{ext}")
                         out_file = re.sub(r"[\r\n\t]+", "", out_file)
                         self.out_var.set(out_file)
                         self.status_var.set("대기 중")
@@ -681,7 +762,7 @@ class ScraperGUI:
         ext = ".epub" if self.file_format.get() == "epub" else ".txt"
         if cached_title:
             safe_name = scrape_novel._safe_filename(cached_title)
-            out_file = str(self._default_downloads() / f"{safe_name}{ext}")
+            out_file = str(self.get_current_download_dir() / f"{safe_name}{ext}")
             out_file = re.sub(r"[\r\n\t]+", "", out_file)
             self.out_var.set(out_file)
             self._log(f"[*] 소설 제목 확인(이력): {cached_title} -> 저장 파일: {safe_name}{ext}")
@@ -935,7 +1016,15 @@ class ScraperGUI:
         # -----------------------------------------------------------------
         # 안내서 상세 내용
         # -----------------------------------------------------------------
-        add_h1("1. 기본 소설 다운로드 방법")
+        add_h1("1. 기본 저장 폴더 및 구글 드라이브 연동")
+        add_bullet("기본 저장 폴더 지정", "소설 파일이 저장될 위치를 원하는 폴더로 변경할 수 있습니다.")
+        add_subbullet("[폴더 변경…] 버튼을 클릭하여 PC 내 원하는 폴더(D드라이브, 외장하드 등)를 선택합니다.")
+        add_subbullet("지정된 폴더는 자동 저장되어 프로그램을 다시 켜도 계속 유지됩니다.")
+        add_bullet("구글 드라이브(Google Drive) 폴더 지정", "")
+        add_subbullet("[구글 드라이브] 버튼을 누르면 PC에 연결된 구글 드라이브(G:\\내 드라이브 등)를 자동 감지하여 설정합니다.")
+        add_subbullet("구글 드라이브로 지정 시 다운로드된 소설이 스마트폰/태블릿의 구글 드라이브 앱과 즉시 자동 동기화됩니다.")
+
+        add_h1("2. 기본 소설 다운로드 방법")
         add_bullet("1단계: 소설 URL 복사 (클립보드 자동 감지)", "")
         add_subbullet("웹 브라우저에서 소설 목록 페이지의 주소를 복사합니다.")
         add_subbullet("프로그램이 클립보드를 실시간 감지하여 소설 제목 확인 및 저장 파일명을 자동으로 채웁니다.")
@@ -946,13 +1035,13 @@ class ScraperGUI:
         add_subbullet("[시작] 버튼을 누르면 브라우저를 통해 본문 수집이 진행됩니다.")
         add_subbullet("사이트에 표지 이미지가 있는 경우 전자책(EPUB) 표지로 자동 포함됩니다.")
 
-        add_h1("2. 이어서 수집 (이어받기)")
+        add_h1("3. 이어서 수집 (이어받기)")
         add_bullet("중단된 작업 이어받기", "")
         add_subbullet("수집 중 [중지] 버튼을 눌렀거나, 사이트 제한/네트워크 오류로 중단된 경우 사용합니다.")
         add_subbullet("상단의 '이전 수집 이력' 목록에서 해당 소설을 선택하고 [이어서 수집]을 누릅니다.")
         add_subbullet("이미 수집 완료된 회차는 자동으로 건너뛰고, 남은 회차만 고속으로 이어서 다운로드합니다.")
 
-        add_h1("3. 연재 소설 관리 및 자동 업데이트")
+        add_h1("4. 연재 소설 관리 및 자동 업데이트")
         add_bullet("[연재 소설로 등록] 체크", "")
         add_subbullet("소설을 다운로드할 때 체크하면 우측의 「연재중 소설 목록」에 자동 보관됩니다.")
         add_bullet("우측 패널 기능 활용", "")
@@ -965,14 +1054,14 @@ class ScraperGUI:
         add_subbullet("예: '소설제목.epub' → '소설제목 [150화].epub'")
         add_subbullet("이후 180화까지 추가 업데이트되면 '소설제목 [180화].epub'로 스마트하게 자동 교체됩니다.")
 
-        add_h1("4. 주요 옵션 가이드")
+        add_h1("5. 주요 옵션 가이드")
         add_bullet("최소 / 최대 지연(초)", "회차 사이의 대기 시간입니다. 사이트 차단 방지를 위해 기본 15~20초를 권장합니다.")
         add_bullet("개수 제한(0=전체)", "0은 전체 완결/최신화까지 수집하며, 특정 숫자 입력 시 해당 화수만큼만 수집합니다.")
         add_bullet("창 표시 / CF 우회", "Cloudflare 보안 검사나 캡차가 뜨는 사이트인 경우 활성화합니다.")
         add_bullet("쿼터시 자정(0시)후 자동재시도", "일일 열람 제한에 도달했을 때 켜두면, 자정(00:01)에 자동으로 풀리는 시점을 기다려 수집을 재개합니다.")
         add_bullet("클립보드 자동 감지", "브라우저에서 주소 복사 시 자동으로 가져오는 편리 기능입니다.")
 
-        add_h1("5. 문제 해결 및 팁")
+        add_h1("6. 문제 해결 및 팁")
         add_bullet("Q. 본문이 비어 있는 게시물이 있어요.", "")
         add_subbullet("공지나 삭제된 게시물 등 본문이 없는 회차는 자동으로 건너뛰며, 연속 실패가 아닐 경우 쿼터 초과로 오인하지 않고 정상 진행됩니다.")
         add_bullet("Q. '열람 제한' 또는 '차단' 오류가 발생해요.", "")

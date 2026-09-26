@@ -410,6 +410,31 @@ class ExtractBodyTests(unittest.TestCase):
             latest_ep = scrape_novel.get_latest_done_episode(nid, cache_root=tmp)
             self.assertEqual(latest_ep, 180)
 
+    def test_settings_and_default_download_dir(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            custom_download = tmp / "MyCustomDownloads"
+            custom_download.mkdir()
+
+            # 1. 초기 상태: 설정 없음 -> 기본 Downloads 반환
+            self.assertEqual(scrape_novel.get_settings(tmp), {})
+
+            # 2. download_dir 설정 저장
+            scrape_novel.save_settings({"download_dir": str(custom_download)}, cache_root=tmp)
+            saved = scrape_novel.get_settings(tmp)
+            self.assertEqual(saved.get("download_dir"), str(custom_download))
+
+            # 3. get_default_download_dir가 설정된 경로를 우선 반환하는지 검증
+            def_dir = scrape_novel.get_default_download_dir(cache_root=tmp)
+            self.assertEqual(def_dir, custom_download)
+
+            # 4. detect_google_drive_dir 호출 안전성 검증 (크래시 없이 Path 또는 None 반환)
+            gdrive = scrape_novel.detect_google_drive_dir()
+            self.assertTrue(gdrive is None or isinstance(gdrive, Path))
+
 
 if __name__ == "__main__":
     unittest.main()
