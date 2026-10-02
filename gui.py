@@ -152,6 +152,8 @@ class ScraperGUI:
         self.url_entry.focus()
         self.url_entry.bind("<FocusOut>", self._on_url_entry_event)
         self.url_entry.bind("<Return>", self._on_url_entry_event)
+        self._url_debounce_job = None
+        self.url_var.trace_add("write", self._on_url_var_changed)
 
         # 기본 저장 폴더
         ttk.Label(frm, text="기본 저장 폴더").grid(row=2, column=0, sticky="w", **pad)
@@ -682,13 +684,25 @@ class ScraperGUI:
                     self.log_txt["state"] = "disabled"
                 elif kind == "detected_title":
                     url, title = data
-                    if self.url_var.get() == url:
+                    curr_url = self.url_var.get().strip()
+                    is_match = False
+                    if curr_url == url:
+                        is_match = True
+                    else:
+                        try:
+                            if scrape_novel.parse_novel_id(curr_url) == scrape_novel.parse_novel_id(url):
+                                is_match = True
+                        except Exception:
+                            pass
+
+                    if is_match and title:
                         safe_name = scrape_novel._safe_filename(title)
                         ext = ".epub" if self.file_format.get() == "epub" else ".txt"
                         out_file = str(self.get_current_download_dir() / f"{safe_name}{ext}")
                         out_file = re.sub(r"[\r\n\t]+", "", out_file)
                         self.out_var.set(out_file)
-                        self.status_var.set("대기 중")
+                        if self.status_var.get() in ("소설 제목 확인 중…", "시작 중…", ""):
+                            self.status_var.set("대기 중")
                         self._log(f"[*] 소설 제목 확인: {title} -> 저장 파일: {safe_name}{ext}")
                         try:
                             nid = scrape_novel.parse_novel_id(url)
@@ -717,6 +731,20 @@ class ScraperGUI:
         except queue.Empty:
             pass
         self.root.after(100, self._drain_queue)
+
+    def _on_url_var_changed(self, *args):
+        # 입력창에 타이핑하거나 붙여넣기할 때 300ms 디바운스 후 제목 추출
+        if self._url_debounce_job:
+            try:
+                self.root.after_cancel(self._url_debounce_job)
+            except Exception:
+                pass
+        self._url_debounce_job = self.root.after(300, self._process_url_change)
+
+    def _process_url_change(self):
+        url = self.url_var.get().strip()
+        if url and "/novel/" in url:
+            self._update_title_and_filename(url, auto_start=False)
 
     def _on_url_entry_event(self, event=None):
         url = self.url_var.get().strip()
@@ -770,8 +798,9 @@ class ScraperGUI:
                 self.start()
         else:
             self.status_var.set("소설 제목 확인 중…")
+            proxy_val = self.proxy.get().strip() or None
             def _fetch_title():
-                title = scrape_novel.quick_fetch_novel_title(url)
+                title = scrape_novel.quick_fetch_novel_title(url, proxy=proxy_val)
                 self.log_q.put(("detected_title", (url, title)))
             threading.Thread(target=_fetch_title, daemon=True).start()
 
@@ -846,6 +875,7 @@ class ScraperGUI:
                 also_save_other=params.get("also_save_other", False),
                 log=self._log, should_stop=self.stop_event.is_set,
                 on_progress=self._progress,
+                on_title_detected=lambda t: self.log_q.put(("detected_title", (params["url"], t))),
             )
             result["ok"] = True
             result["path"] = path

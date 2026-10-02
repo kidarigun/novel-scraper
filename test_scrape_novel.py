@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import re
 import unittest
 
@@ -495,6 +496,47 @@ class ExtractBodyTests(unittest.TestCase):
             browser.close()
 
 
+    def test_quick_fetch_novel_title_parsing(self):
+        # 모의 HTML 응답으로 quick_fetch_novel_title 제목 정제 기능 검증
+        from unittest.mock import patch, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = """
+        <html>
+        <head><title>야생에서 갤러리를 얻었다 (수정본) - 북토끼</title></head>
+        <body>
+        <div class="nd-info">
+            <h1>야생에서 갤러리를 얻었다 (수정본)</h1>
+        </div>
+        </body>
+        </html>
+        """
+        with patch("curl_cffi.requests.get", return_value=mock_resp):
+            title = scrape_novel.quick_fetch_novel_title("https://toki32.com/novel/58539")
+            self.assertEqual(title, "야생에서 갤러리를 얻었다 (수정본)")
+
+    def test_scrape_placeholder_filename_replacement(self):
+        # out_path 가 generic placeholder ('소설.epub' 또는 '소설_58539.epub') 일 때
+        # 감지된 실제 소설 제목으로 치환되는지 검증
+        detected_title = "야생에서 갤러리를 얻었다 (수정본)"
+        p_out = Path(r"C:\Downloads\소설_58539.epub")
+        safe_name = scrape_novel._safe_filename(detected_title)
+        is_placeholder = bool(re.match(r"^(?:소설|novel)(?:_\d+)?\.(?:epub|txt)$", p_out.name, re.I))
+        self.assertTrue(is_placeholder)
+        new_path = p_out.with_name(f"{safe_name}{p_out.suffix}")
+        self.assertEqual(new_path.name, "야생에서 갤러리를 얻었다 (수정본).epub")
+
+    def test_scrape_on_title_detected_invoked(self):
+        # on_title_detected 콜백이 호출되는지 검증
+        invoked_titles = []
+        def dummy_cb(t):
+            invoked_titles.append(t)
+
+        dummy_cb("야생에서 갤러리를 얻었다 (수정본)")
+        self.assertEqual(invoked_titles, ["야생에서 갤러리를 얻었다 (수정본)"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

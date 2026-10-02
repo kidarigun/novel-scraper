@@ -744,14 +744,18 @@ def derive_novel_title(chapters, fallback, detected_title=None):
     return detected_title or fallback
 
 
-def quick_fetch_novel_title(url):
-    """소설 목록 페이지에서 가볍게 제목만 빠르게 파싱 (브라우저 기동 없이 0.5~1초 이내)."""
+def quick_fetch_novel_title(url, proxy=None):
+    """소설 목록 페이지에서 가볍게 제목만 빠르게 파싱 (curl_cffi 우선 시도 후 실패 시 경량 브라우저 폴백)."""
+    # 1. 초고속 curl_cffi 시도 (0.5~1초 이내)
     try:
         from curl_cffi import requests
-        r = requests.get(url, impersonate="chrome124", timeout=7)
+        req_kwargs = {"impersonate": "chrome124", "timeout": 7}
+        if proxy:
+            req_kwargs["proxy"] = proxy
+        r = requests.get(url, **req_kwargs)
         if r.status_code == 200:
             html = r.text
-            # 1. <h1> 태그 (.nd-info h1, section.novel-detail h1 등)
+            # 1-1. <h1> 태그 (.nd-info h1, section.novel-detail h1 등)
             m = re.search(r'<(?:h1)[^>]*>(.*?)<\/h1>', html, re.I | re.S)
             if m:
                 t = re.sub(r"<[^>]+>", "", m.group(1)).strip()
@@ -760,7 +764,7 @@ def quick_fetch_novel_title(url):
                 t = re.sub(r"\s+", " ", t).strip()
                 if t:
                     return t
-            # 2. og:title
+            # 1-2. og:title
             m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html)
             if m:
                 t = m.group(1).strip()
@@ -769,7 +773,7 @@ def quick_fetch_novel_title(url):
                 t = re.sub(r"\s+", " ", t).strip()
                 if t:
                     return t
-            # 3. .page-title
+            # 1-3. .page-title
             m = re.search(r'class=["\'][^"\']*page-title[^"\']*["\'][^>]*>(.*?)<', html)
             if m:
                 t = m.group(1).strip()
@@ -778,7 +782,7 @@ def quick_fetch_novel_title(url):
                 t = re.sub(r"\s+", " ", t).strip()
                 if t:
                     return t
-            # 4. <title>
+            # 1-4. <title>
             m = re.search(r'<title>([^<]+)</title>', html)
             if m:
                 t = m.group(1).strip()
@@ -789,11 +793,40 @@ def quick_fetch_novel_title(url):
                     return t
     except Exception:
         pass
+
+    # 2. curl_cffi 실패 시 (SNI 차단, Cloudflare 등): 경량 브라우저 폴백
+    if StealthySession is not None:
+        try:
+            browser_kwargs = {"headless": True, "block_webrtc": True}
+            if proxy:
+                browser_kwargs["proxy"] = proxy
+            with StealthySession(**browser_kwargs) as session:
+                resp = session.fetch(url, timeout=12000)
+                html = resp.text or ""
+                # h1 등 파싱
+                for pat in [
+                    r'<(?:h1)[^>]*>(.*?)<\/h1>',
+                    r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']',
+                    r'class=["\'][^"\']*page-title[^"\']*["\'][^>]*>(.*?)<',
+                    r'<title>([^<]+)</title>'
+                ]:
+                    m = re.search(pat, html, re.I | re.S)
+                    if m:
+                        t = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                        t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
+                        t = re.sub(r"\s*완결소설.*$", "", t)
+                        t = re.sub(r"\s+", " ", t).strip()
+                        if t and not re.search(r"Just a moment|Cloudflare|Attention Required", t, re.I):
+                            return t
+        except Exception:
+            pass
+
     try:
         novel_id = parse_novel_id(url)
         return f"소설_{novel_id}"
     except Exception:
         return "소설"
+
 
 
 def download_cover_image(img_url, proxy=None, log=None):
@@ -1506,7 +1539,7 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
            rest_every=20, rest_secs=45.0, content_timeout=20000, proxy=None,
            solve_cf=False, headful=False, limit=0, max_consecutive_failures=3,
            also_save_other=False,
-           log=print, should_stop=None, on_progress=None):
+           log=print, should_stop=None, on_progress=None, on_title_detected=None):
     """
     소설을 스크래핑해 out_path(단일 txt 또는 epub)로 저장하고 그 경로를 반환.
     """
@@ -1552,6 +1585,12 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
             chapters = chapters[:limit]
         novel_title = derive_novel_title(chapters, novel_id, detected_title)
 
+        if on_title_detected and novel_title:
+            try:
+                on_title_detected(novel_title)
+            except Exception:
+                pass
+
         # 표지 이미지 로드 및 다운로드
         cover_path = cache_dir / "cover.jpg"
         cover_bytes = None
@@ -1567,9 +1606,16 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
         if out_path:
             cleaned_out = re.sub(r"[\r\n\t]+", "", str(out_path)).strip()
             final_path = Path(cleaned_out)
+            # 만약 기본 임시 파일명(예: '소설.epub', '소설_58539.epub', 'novel.txt' 등)으로 지정되어 있었고
+            # 실제 제목이 발견되었다면 실제 제목 파일명으로 자동 전환
+            safe_name = _safe_filename(novel_title)
+            is_placeholder = bool(re.match(r"^(?:소설|novel)(?:_\d+)?\.(?:epub|txt)$", final_path.name, re.I))
+            if is_placeholder and not re.match(r"^소설_\d+$", novel_title):
+                final_path = final_path.with_name(f"{safe_name}{final_path.suffix}")
         else:
             base = Path(out_dir) if out_dir else Path(__file__).resolve().parent
             final_path = base / f"{_safe_filename(novel_title)}.txt"
+
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
         total = len(chapters)
