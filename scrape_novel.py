@@ -596,42 +596,112 @@ def make_toki_list_page_action(log=None, on_title_detected=None, result_containe
                 pass
 
         try:
-            # 3. 최초 회차 목록 상태 및 li 개수 분석
-            stats_js = """
+            # 3. 챕터 목록 추출 헬퍼 JS (현재 DOM에 있는 모든 회차 추출)
+            extract_dom_js = """
             () => {
                 const listEl = document.querySelector("ul.novel-eps, [class*='novel-eps'], ul[id*='novel-episode-list']");
                 const lis = listEl ? Array.from(listEl.querySelectorAll("li")) : Array.from(document.querySelectorAll("ul.novel-eps li"));
-                let maxEp = 0;
-                let minEp = 99999999;
+                const chapters = [];
+                const seen = new Set();
                 let hasEp1 = false;
+                let minEp = 99999999;
+                let maxEp = 0;
 
-                lis.forEach((li) => {
-                    const txt = (li.innerText || li.textContent || "").trim();
-                    if (/^<*\\s*(?:이전화|다음화|목록)\\s*>*$/.test(txt)) return;
-                    if (txt.includes(" 1화") || txt.startsWith("1화") || txt.includes("1화 -") || txt.includes("1화:") || txt.includes("제 1화") || txt.includes("제1화")) {
+                for (const li of lis) {
+                    const a = li.querySelector("a") || (li.tagName.toLowerCase() === "a" ? li : null);
+                    if (!a) continue;
+                    const href = a.getAttribute("href") || a.href || "";
+                    const m = href.match(/\\/novel\\/\\d+\\/(\\d+)/);
+                    if (!m) continue;
+                    const eid = parseInt(m[1], 10);
+                    if (seen.has(eid)) continue;
+
+                    let title = (a.innerText || a.textContent || "").trim();
+                    title = title.replace(/\\s+/g, " ");
+
+                    // "1화 1화" 또는 "300화 300화" 와 같은 중복 텍스트 정제
+                    const dupMatch = title.match(/^(.+?)\\s+\\1$/);
+                    if (dupMatch) {
+                        title = dupMatch[1];
+                    }
+
+                    // 이전화/다음화/목록 등 네비게이션 버튼 텍스트 필터링
+                    if (/^<*\\s*(?:이전화|다음화|목록|전체보기)\\s*>*$/i.test(title)) {
+                        continue;
+                    }
+
+                    seen.add(eid);
+                    const numM = title.match(/(?:제\\s*)?(\\d+)\\s*화/) || title.match(/-\\s*(\\d+)/);
+                    const no = numM ? parseInt(numM[1], 10) : null;
+                    if (no !== null) {
+                        if (no > maxEp) maxEp = no;
+                        if (no < minEp) minEp = no;
+                        if (no === 1) hasEp1 = true;
+                    }
+                    if (title.includes(" 1화") || title.startsWith("1화") || title.includes("제 1화") || title.includes("제1화")) {
                         hasEp1 = true;
                     }
-                    const m = txt.match(/(?:제\\s*)?(\\d+)\\s*화/) || txt.match(/-\\s*(\\d+)/);
-                    if (m) {
-                        const num = parseInt(m[1], 10);
-                        if (num > maxEp) maxEp = num;
-                        if (num < minEp) minEp = num;
-                        if (num === 1) hasEp1 = true;
-                    }
-                });
+
+                    chapters.push({
+                        episode_id: eid,
+                        no: no,
+                        title: title,
+                        url: a.href || href
+                    });
+                }
+
+                let title = "";
+                const tEl = document.querySelector(".nd-info h1") || document.querySelector("section.novel-detail h1") || document.querySelector("h1");
+                if (tEl) {
+                    title = (tEl.innerText || tEl.textContent || "").split('\\n')[0].trim();
+                    title = title.replace(/\\s*-\\s*(?:북토끼|뉴토끼|마나토끼|toki\\d*|토끼\\d*).*$/i, "");
+                    title = title.replace(/\\s*완결소설.*$/i, "").trim();
+                }
+
+                let cover = "";
+                const cEl = document.querySelector(".nd-thumb img") || document.querySelector("section.novel-detail img");
+                if (cEl) {
+                    cover = cEl.getAttribute("src") || cEl.src || "";
+                }
 
                 return {
-                    liCount: lis.length,
-                    maxEp: maxEp,
+                    chapters: chapters,
+                    title: title,
+                    cover: cover,
+                    hasEp1: hasEp1,
                     minEp: minEp < 99999999 ? minEp : 0,
-                    hasEp1: hasEp1
+                    maxEp: maxEp,
+                    liCount: lis.length
                 };
             }
             """
-            init_stats = page.evaluate(stats_js) or {}
-            li_count = init_stats.get("liCount", 0)
-            max_ep = init_stats.get("maxEp", 0)
-            has_ep1 = init_stats.get("hasEp1", False)
+
+            # 4. 누적 챕터 보관 맵 (SPA 가상 스크롤로 상단 회차가 DOM에서 사라져도 누적 보존)
+            accumulated_chapters = {}
+            global_detected_title = None
+            global_detected_cover = None
+
+            def _merge_dom_data(d):
+                nonlocal global_detected_title, global_detected_cover
+                if not d:
+                    return
+                if not global_detected_title and d.get("title"):
+                    global_detected_title = d.get("title")
+                if not global_detected_cover and d.get("cover"):
+                    global_detected_cover = d.get("cover")
+                for ch in d.get("chapters", []):
+                    eid = ch.get("episode_id")
+                    if eid and eid not in accumulated_chapters:
+                        accumulated_chapters[eid] = ch
+
+            # 최초 상태 스냅샷 수집
+            init_data = page.evaluate(extract_dom_js) or {}
+            _merge_dom_data(init_data)
+
+            li_count = init_data.get("liCount", 0)
+            max_ep = init_data.get("maxEp", 0)
+            min_ep = init_data.get("minEp", 0)
+            has_ep1 = init_data.get("hasEp1", False) or (min_ep == 1)
 
             if has_ep1:
                 _log("    [*] 이미 1화까지 전체 목록이 표시되어 있습니다. 더보기 클릭 생략.")
@@ -639,12 +709,13 @@ def make_toki_list_page_action(log=None, on_title_detected=None, result_containe
                 # 100화 단위 로딩 기반 예상 클릭 수 산출
                 remaining = max_ep - li_count
                 expected_clicks = max(1, (remaining + 99) // 100) if remaining > 0 else 1
-                max_clicks = min(expected_clicks + 3, 50)
+                max_clicks = min(expected_clicks + 4, 60)
                 _log(f"    [*] 최신 회차(약 {max_ep}화, 현재 {li_count}개) 감지 (100화 단위 로드) -> 예상 더보기 횟수 약 {expected_clicks}회 이내")
 
                 click_count = 0
                 no_growth_streak = 0
-                last_li_count = li_count
+                last_accum_count = len(accumulated_chapters)
+                last_min_ep = min_ep
 
                 while click_count < max_clicks:
                     find_btn_js = """
@@ -715,32 +786,37 @@ def make_toki_list_page_action(log=None, on_title_detected=None, result_containe
 
                     click_count += 1
 
-                    # 클릭 후 서버 응답 및 DOM 갱신 대기 (최대 5.5초 동안 li 개수 증가 능동 감시)
+                    # 클릭 후 서버 응답 및 DOM 갱신 대기 (최대 5.5초 동안 누적 챕터 증가 또는 minEp 하락 능동 감시)
                     wait_start = time.time()
                     grew = False
-                    cur_stats = {}
+                    cur_data = {}
                     while time.time() - wait_start < 5.5:
                         page.wait_for_timeout(350)
-                        cur_stats = page.evaluate(stats_js) or {}
-                        cur_li_count = cur_stats.get("liCount", 0)
-                        cur_has_ep1 = cur_stats.get("hasEp1", False)
+                        cur_data = page.evaluate(extract_dom_js) or {}
+                        _merge_dom_data(cur_data)
+                        cur_min_ep = cur_data.get("minEp", 0)
+                        cur_has_ep1 = cur_data.get("hasEp1", False) or (cur_min_ep == 1)
                         if cur_has_ep1:
                             break
-                        if cur_li_count > last_li_count:
+                        if len(accumulated_chapters) > last_accum_count or (cur_min_ep > 0 and cur_min_ep < last_min_ep):
                             grew = True
                             break
 
-                    cur_li_count = cur_stats.get("liCount", 0)
-                    cur_has_ep1 = cur_stats.get("hasEp1", False)
+                    _merge_dom_data(cur_data)
+                    cur_accum_count = len(accumulated_chapters)
+                    cur_min_ep = cur_data.get("minEp", 0)
+                    cur_has_ep1 = cur_data.get("hasEp1", False) or (cur_min_ep == 1)
 
                     if cur_has_ep1:
-                        _log(f"    [*] 1화 도달 확인 (총 {click_count}회 클릭, {cur_li_count}개 회차 로드 완료).")
+                        _log(f"    [*] 1화 도달 확인 (총 {click_count}회 클릭, 누적 {cur_accum_count}개 회차 확보 완료).")
                         break
 
-                    if grew or cur_li_count > last_li_count:
+                    if grew or cur_accum_count > last_accum_count or (cur_min_ep > 0 and cur_min_ep < last_min_ep):
                         no_growth_streak = 0
-                        _log(f"    [*] 이전 회차 로딩 중... ({cur_li_count}개 회차 확보, 누적 {click_count}회 클릭)")
-                        last_li_count = cur_li_count
+                        _log(f"    [*] 이전 회차 로딩 중... (누적 {cur_accum_count}개 회차 확보, 최저 {cur_min_ep}화, 누적 {click_count}회 클릭)")
+                        last_accum_count = cur_accum_count
+                        if cur_min_ep > 0:
+                            last_min_ep = cur_min_ep
                         # 자연스러운 클릭 간격 유지 (0.9~1.2초 휴식)
                         page.wait_for_timeout(int(random.uniform(0.9, 1.25) * 1000))
                     else:
@@ -752,70 +828,16 @@ def make_toki_list_page_action(log=None, on_title_detected=None, result_containe
                 if click_count > 0:
                     _log(f"    [*] 이전 회차 전체 펼침 완료 (총 {click_count}회 로딩 완료)")
 
-            # 4. 브라우저 DOM 상의 ul.novel-eps li a 전체에서 챕터 목록, 제목, 표지 직접 추출
-            extract_dom_js = """
-            () => {
-                const listEl = document.querySelector("ul.novel-eps, [class*='novel-eps'], ul[id*='novel-episode-list']");
-                const lis = listEl ? Array.from(listEl.querySelectorAll("li")) : Array.from(document.querySelectorAll("ul.novel-eps li"));
-                const chapters = [];
-                const seen = new Set();
+            # 최종 상태 한 번 더 병합
+            final_dom_data = page.evaluate(extract_dom_js) or {}
+            _merge_dom_data(final_dom_data)
 
-                for (const li of lis) {
-                    const a = li.querySelector("a") || (li.tagName.toLowerCase() === "a" ? li : null);
-                    if (!a) continue;
-                    const href = a.getAttribute("href") || a.href || "";
-                    const m = href.match(/\\/novel\\/\\d+\\/(\\d+)/);
-                    if (!m) continue;
-                    const eid = parseInt(m[1], 10);
-                    if (seen.has(eid)) continue;
-
-                    let title = (a.innerText || a.textContent || "").trim();
-                    title = title.replace(/\\s+/g, " ");
-
-                    // "1화 1화" 또는 "300화 300화" 와 같은 중복 텍스트 정제
-                    const dupMatch = title.match(/^(.+?)\\s+\\1$/);
-                    if (dupMatch) {
-                        title = dupMatch[1];
-                    }
-
-                    // 이전화/다음화/목록 등 네비게이션 버튼 텍스트 필터링
-                    if (/^<*\\s*(?:이전화|다음화|목록|전체보기)\\s*>*$/i.test(title)) {
-                        continue;
-                    }
-
-                    seen.add(eid);
-                    const numM = title.match(/(?:제\\s*)?(\\d+)\\s*화/) || title.match(/-\\s*(\\d+)/);
-                    const no = numM ? parseInt(numM[1], 10) : null;
-                    chapters.push({
-                        episode_id: eid,
-                        no: no,
-                        title: title,
-                        url: a.href || href
-                    });
-                }
-
-                let title = "";
-                const tEl = document.querySelector(".nd-info h1") || document.querySelector("section.novel-detail h1") || document.querySelector("h1");
-                if (tEl) {
-                    title = (tEl.innerText || tEl.textContent || "").split('\\n')[0].trim();
-                    title = title.replace(/\\s*-\\s*(?:북토끼|뉴토끼|마나토끼|toki\\d*|토끼\\d*).*$/i, "");
-                    title = title.replace(/\\s*완결소설.*$/i, "").trim();
-                }
-
-                let cover = "";
-                const cEl = document.querySelector(".nd-thumb img") || document.querySelector("section.novel-detail img");
-                if (cEl) {
-                    cover = cEl.getAttribute("src") || cEl.src || "";
-                }
-
-                return {
-                    chapters: chapters,
-                    title: title,
-                    cover: cover
-                };
+            all_chapters = list(accumulated_chapters.values())
+            dom_data = {
+                "chapters": all_chapters,
+                "title": global_detected_title or final_dom_data.get("title", ""),
+                "cover": global_detected_cover or final_dom_data.get("cover", "")
             }
-            """
-            dom_data = page.evaluate(extract_dom_js) or {}
             if result_container is not None and isinstance(result_container, dict):
                 result_container.update(dom_data)
             setattr(page, "_toki_extracted_data", dom_data)
@@ -1111,9 +1133,13 @@ def extract_chapters_toki_app(session_or_page, list_url, solve_cf=False, log=Non
     # 1화부터 순서대로 읽기 위해 목록을 역순으로 뒤집어 오름차순으로 정렬
     for it in items:
         t = it.get("title", "")
+        # 끝에 붙은 'UP', 'NEW' 등 뱃지 태그 텍스트 제거
+        t = re.sub(r"\s+(?:UP|NEW)$", "", t, flags=re.I).strip()
+        # "321화 321화" 등 반복 단어 제거
         m_dup = re.match(r"^(.+?)\s+\1$", t)
         if m_dup:
-            it["title"] = m_dup.group(1)
+            t = m_dup.group(1)
+        it["title"] = t
 
     items = list(reversed(items))
     if all(it.get("no") is not None for it in items):
