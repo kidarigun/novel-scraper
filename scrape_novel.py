@@ -869,7 +869,7 @@ def fetch_with_retry(session, url, *, page_action=None, wait_selector=None,
             raise StopScrape()
         try:
             # 첫 시도 실패 후에는 자동으로 solve_cf 활성화
-            active_solve_cf = solve_cf or (attempt > 1)
+            active_solve_cf = solve_cf or (attempt > 1) or ("toki" in url)
             page = _fetch(session, url, page_action=page_action,
                           wait_selector=wait_selector, solve_cf=active_solve_cf,
                           network_idle=network_idle)
@@ -881,8 +881,9 @@ def fetch_with_retry(session, url, *, page_action=None, wait_selector=None,
             raise
         except Exception as e:  # noqa: BLE001
             last_err = e
+            err_line = str(e).split("\n")[0].strip()
             backoff = base_backoff * (2 ** (attempt - 1)) + random.uniform(0, 5)
-            log(f"    ! 시도 {attempt}/{max_retries} 실패 ({e}). {backoff:.0f}초 대기 후 재시도")
+            log(f"    ! 시도 {attempt}/{max_retries} 실패 ({err_line}). {backoff:.0f}초 대기 후 재시도")
             _interruptible_sleep(backoff, should_stop)
     raise RuntimeError(f"'{url}' 최종 실패: {last_err}")
 
@@ -2062,7 +2063,12 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
     novel_log = cache_dir / "scrape.log"
     log = make_file_logger(log, app_log, novel_log)
 
-    session_kwargs = {"headless": not headful, "block_webrtc": True}
+    session_kwargs = {
+        "headless": not headful,
+        "block_webrtc": True,
+        "retries": 5,
+        "retry_delay": 2,
+    }
     if proxy:
         session_kwargs["proxy"] = proxy
 
