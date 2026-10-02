@@ -162,6 +162,9 @@ EXTRACT_JS = r"""
   };
 
   const selectors = [
+    'article.novel-viewer',
+    '.novel-viewer',
+    '[class*="novel-viewer"]',
     '.novel-epub-rendered',
     '[data-novel-content]',
     '[data-theme-novel-content]',
@@ -392,13 +395,91 @@ def parse_novel_id(list_url):
 
 def make_body_action(max_ms):
     def act(page):
-        try:
-            res = page.evaluate(EXTRACT_JS, max_ms)
-            if isinstance(res, dict):
-                setattr(page, "_extracted_novel_data", res)
-        except Exception:  # noqa: BLE001
-            pass
+        start_time = time.time()
+        deadline = start_time + (max_ms / 1000.0)
+
+        while time.time() < deadline:
+            # 1. Closed shadow DOM (toki32.com 계열): Playwright native locator로 피어싱 탐색
+            try:
+                for sel in [
+                    "article.novel-viewer p",
+                    ".novel-viewer p",
+                    "article.novel-viewer >> p",
+                    "[class*='novel-viewer'] p",
+                ]:
+                    loc = page.locator(sel)
+                    count = loc.count()
+                    if count > 0:
+                        lines = []
+                        for i in range(count):
+                            t = loc.nth(i).inner_text().strip()
+                            if t and not any(p.search(t) for p in JUNK_PATTERNS) and "댓글이 없습니다" not in t:
+                                lines.append(t)
+                        if lines and len(SEP.join(lines)) >= 50:
+                            text = SEP.join(lines)
+                            setattr(page, "_extracted_novel_data", {
+                                "ok": True,
+                                "state": "ok",
+                                "source": sel,
+                                "length": len(text),
+                                "text": text,
+                            })
+                            return page
+            except Exception:
+                pass
+
+            # 2. 기존 newtoki 계열 (직접 API 복호화 또는 오픈 shadow DOM / 일반 컨테이너)
+            try:
+                remaining_ms = max(200, int((deadline - time.time()) * 1000))
+                res = page.evaluate(EXTRACT_JS, min(800, remaining_ms))
+                if isinstance(res, dict) and res.get("ok"):
+                    setattr(page, "_extracted_novel_data", res)
+                    return page
+            except Exception:
+                pass
+
+            time.sleep(0.3)
+
         return page
+
+    return act
+
+
+def make_list_page_action(log=None):
+    """소설 목록 페이지에서 [이전 회차 더 보기] 버튼이 존재할 경우 끝까지 자동 클릭하여 모든 회차 펼침."""
+    _log = log or (lambda m: None)
+
+    def act(page):
+        try:
+            click_count = 0
+            while True:
+                more_btn = None
+                for sel in [
+                    "button:has-text('더 보기')",
+                    "button:has-text('더보기')",
+                    "button.btn--outline",
+                    "[class*='novel-eps'] ~ div button",
+                    "button:has-text('이전 회차')",
+                ]:
+                    cand = page.locator(sel)
+                    if cand.count() > 0 and cand.first.is_visible():
+                        more_btn = cand.first
+                        break
+                if not more_btn:
+                    break
+                more_btn.click()
+                click_count += 1
+                if click_count % 5 == 0:
+                    _log(f"    [*] 이전 회차 더보기 자동 클릭 중... ({click_count}회)")
+                page.wait_for_timeout(350)
+                if click_count >= 300:
+                    break
+            if click_count > 0:
+                _log(f"    [*] 이전 회차 전체 펼침 완료 (총 {click_count}회 추가 로딩)")
+        except Exception as e:
+            _log(f"    [*] 더보기 버튼 처리 알림: {e}")
+        return page
+
     return act
 
 
@@ -490,34 +571,45 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
             visited_pages.add(page_url)
             if should_stop and should_stop():
                 raise StopScrape()
-            page = fetch_with_retry(session_or_page, page_url, solve_cf=solve_cf,
-                                    log=_log, should_stop=should_stop)
+            list_action = make_list_page_action(log=_log) if not hasattr(session_or_page, "css") else None
+            page = fetch_with_retry(session_or_page, page_url, page_action=list_action,
+                                    solve_cf=solve_cf, log=_log, should_stop=should_stop)
 
         visited_pages.add(page_url)
 
         if not detected_title:
-            t_el = page.css(".page-title") or page.css("title")
+            t_el = (page.css(".nd-info h1") or
+                    page.css("section.novel-detail h1") or
+                    page.css(".page-title") or
+                    page.css("h1") or
+                    page.css("title"))
             if t_el:
                 raw_t = t_el[0].get_all_text().strip()
                 lines = [line.strip() for line in raw_t.splitlines() if line.strip()]
                 if lines:
                     raw_t = lines[0]
-                raw_t = re.sub(r"\s*-\s*뉴토끼.*$", "", raw_t)
+                raw_t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", raw_t, flags=re.I)
                 raw_t = re.sub(r"\s*완결소설.*$", "", raw_t)
                 raw_t = re.sub(r"\s+", " ", raw_t).strip()
                 if raw_t:
                     detected_title = raw_t
 
         if not detected_cover_url:
-            meta_img = page.css('meta[property="og:image"]') or page.css('meta[name="og:image"]')
-            if meta_img:
-                c_url = meta_img[0].attrib.get("content", "").strip()
-                if c_url and ("board_uploads" in c_url or "/novel/" in c_url):
+            thumb_imgs = page.css(".nd-thumb img") or page.css("[class*='thumb'] img")
+            if thumb_imgs:
+                c_url = thumb_imgs[0].attrib.get("src", "").strip() if thumb_imgs[0].attrib else ""
+                if c_url:
                     detected_cover_url = urllib.parse.urljoin(page_url, c_url)
+            if not detected_cover_url:
+                meta_img = page.css('meta[property="og:image"]') or page.css('meta[name="og:image"]')
+                if meta_img:
+                    c_url = meta_img[0].attrib.get("content", "").strip()
+                    if c_url and ("board_uploads" in c_url or "/novel/" in c_url or "/uploads/" in c_url):
+                        detected_cover_url = urllib.parse.urljoin(page_url, c_url)
             if not detected_cover_url:
                 for img in page.css("img"):
                     isrc = img.attrib.get("src", "") if img.attrib else ""
-                    if isrc and "board_uploads" in isrc and not isrc.endswith(".png"):
+                    if isrc and ("board_uploads" in isrc or "/uploads/" in isrc) and not isrc.endswith(".png"):
                         detected_cover_url = urllib.parse.urljoin(page_url, isrc)
                         break
 
@@ -659,29 +751,38 @@ def quick_fetch_novel_title(url):
         r = requests.get(url, impersonate="chrome124", timeout=7)
         if r.status_code == 200:
             html = r.text
-            # 1. og:title
+            # 1. <h1> 태그 (.nd-info h1, section.novel-detail h1 등)
+            m = re.search(r'<(?:h1)[^>]*>(.*?)<\/h1>', html, re.I | re.S)
+            if m:
+                t = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
+                t = re.sub(r"\s*완결소설.*$", "", t)
+                t = re.sub(r"\s+", " ", t).strip()
+                if t:
+                    return t
+            # 2. og:title
             m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html)
             if m:
                 t = m.group(1).strip()
-                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼).*$", "", t)
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
                 t = re.sub(r"\s*완결소설.*$", "", t)
                 t = re.sub(r"\s+", " ", t).strip()
                 if t:
                     return t
-            # 2. .page-title
+            # 3. .page-title
             m = re.search(r'class=["\'][^"\']*page-title[^"\']*["\'][^>]*>(.*?)<', html)
             if m:
                 t = m.group(1).strip()
-                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼).*$", "", t)
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
                 t = re.sub(r"\s*완결소설.*$", "", t)
                 t = re.sub(r"\s+", " ", t).strip()
                 if t:
                     return t
-            # 3. <title>
+            # 4. <title>
             m = re.search(r'<title>([^<]+)</title>', html)
             if m:
                 t = m.group(1).strip()
-                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼).*$", "", t)
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
                 t = re.sub(r"\s*완결소설.*$", "", t)
                 t = re.sub(r"\s+", " ", t).strip()
                 if t:

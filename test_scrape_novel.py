@@ -435,6 +435,66 @@ class ExtractBodyTests(unittest.TestCase):
             gdrive = scrape_novel.detect_google_drive_dir()
             self.assertTrue(gdrive is None or isinstance(gdrive, Path))
 
+    def test_extract_chapters_toki32_style_structure(self):
+        # toki32 계열: .nd-info h1 제목, .nd-thumb img 표지, 내림차순 회차 목록 시뮬레이션
+        page = _Page({
+            ".nd-info h1": [_Element("야생에서 갤러리를 얻었다 (수정본) - toki32")],
+            ".nd-thumb img": [_Element(attrs={"src": "/uploads/thumb.jpg"})],
+            "a": [
+                _Element("3화 - 위험한 밤", attrs={"href": "/novel/58539/5809519"}),
+                _Element("2화 - 첫 만남", attrs={"href": "/novel/58539/5809518"}),
+                _Element("1화 - 프롤로그", attrs={"href": "/novel/58539/5809517"}),
+            ]
+        })
+
+        items, detected_title, detected_cover = scrape_novel.extract_chapters(
+            page, "https://toki32.com/novel/58539"
+        )
+
+        self.assertEqual(detected_title, "야생에서 갤러리를 얻었다 (수정본)")
+        self.assertEqual(detected_cover, "https://toki32.com/uploads/thumb.jpg")
+        self.assertEqual(len(items), 3)
+        # 내림차순으로 수집된 챕터들이 episode_id 기준으로 오름차순(1화 -> 2화 -> 3화) 정렬되었는지 검증
+        self.assertEqual(items[0]["episode_id"], 5809517)
+        self.assertEqual(items[0]["title"], "1화 - 프롤로그")
+        self.assertEqual(items[1]["episode_id"], 5809518)
+        self.assertEqual(items[2]["episode_id"], 5809519)
+
+    def test_make_body_action_pierces_closed_shadow_dom(self):
+        # Playwright 환경에서 article.novel-viewer 하위 closed shadow DOM 내부 <p> 태그 피어싱 검증
+        try:
+            from patchright.sync_api import sync_playwright
+        except ImportError:
+            return
+
+        viewer_html = """<!DOCTYPE html><html><body>
+          <article class="novel-viewer">
+            <div id="viewer-host" style="--novel-font-size: 16px;"></div>
+          </article>
+          <script>
+            const host = document.getElementById('viewer-host');
+            const shadow = host.attachShadow({ mode: 'closed' });
+            shadow.innerHTML = '<style>p { color: red; }</style><p>1. 첫 번째 문장입니다.</p><p>2. 두 번째 문장입니다.</p><p>3. 세 번째 문장입니다.</p>';
+          </script>
+        </body></html>"""
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content(viewer_html)
+
+            action = scrape_novel.make_body_action(max_ms=2000)
+            action(page)
+
+            data = getattr(page, "_extracted_novel_data", None)
+            self.assertIsNotNone(data)
+            self.assertTrue(data.get("ok"))
+            self.assertIn("1. 첫 번째 문장입니다.", data.get("text", ""))
+            self.assertIn("2. 두 번째 문장입니다.", data.get("text", ""))
+            self.assertIn("3. 세 번째 문장입니다.", data.get("text", ""))
+            browser.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
