@@ -496,78 +496,191 @@ def _solve_human_verification_if_present(page, log=None):
         _log(f"    [*] 보안 인증 확인 중 알림: {e}")
 
 
-def make_list_page_action(log=None):
-    """소설 목록 페이지에서 [이전 회차 더 보기] 버튼이 존재할 경우 끝까지 자동 클릭하여 모든 회차 펼침.
-    display: none, visibility: hidden, opacity: 0 등 CSS로 숨겨진 경우를 정확히 판별하여 중단."""
+def make_list_page_action(log=None, on_title_detected=None):
+    """소설 목록 페이지에서 [이전 회차 더 보기] 버튼을 사람처럼 적절한 간격으로 지능적으로 클릭.
+    - 시작 전 제목부터 즉시 추출하여 콜백으로 전달
+    - 최초 로드된 최신 회차 번호 및 현재 li 개수를 파악하여 필요한 클릭 횟수 추론
+    - 1화 또는 마지막 회차에 도달하거나, 버튼이 DOM에서 제거/숨김 처리되면 즉시 중단
+    - 매 클릭 후 li 목록 증가 여부를 확인하여 불필요한 반복 클릭 방지"""
     _log = log or (lambda m: None)
 
     def act(page):
         # 1. 사람 인증(Turnstile/Cloudflare) 화면이 떠 있다면 통과 시도
         _solve_human_verification_if_present(page, log=_log)
 
-        try:
-            click_count = 0
-            while True:
-                # JavaScript 내에서 버튼 요소 자체 및 상위(부모) 요소의 display, visibility, opacity, offsetParent 등을 모두 검사
-                find_and_click_js = """
+        # 2. 목록 갱신 작업 전, 페이지에 렌더링된 소설 제목부터 즉시 감지하여 상위로 알림
+        if on_title_detected:
+            try:
+                early_title = page.evaluate("""
                 () => {
-                    const selectors = [
-                        "button.btn--outline",
-                        "button:has-text('더 보기')",
-                        "button:has-text('더보기')",
-                        "[class*='novel-eps'] ~ div button",
-                        "button"
-                    ];
-                    let candidates = [];
-                    // 모든 버튼 중 '더 보기', '이전 회차', 또는 novel-eps 하단 버튼 수집
+                    const el = document.querySelector(".nd-info h1") ||
+                               document.querySelector("section.novel-detail h1") ||
+                               document.querySelector(".page-title") ||
+                               document.querySelector("h1");
+                    if (el) {
+                        let t = el.innerText || el.textContent || "";
+                        t = t.split('\\n')[0].trim();
+                        t = t.replace(/\\s*-\\s*(?:북토끼|뉴토끼|마나토끼|toki\\d*|토끼\\d*).*$/i, "");
+                        t = t.replace(/\\s*완결소설.*$/i, "");
+                        return t.trim();
+                    }
+                    return "";
+                }
+                """)
+                if early_title:
+                    _log(f"[*] 소설 제목 감지: {early_title}")
+                    on_title_detected(early_title)
+            except Exception:
+                pass
+
+        try:
+            # 3. 최초 회차 목록 상태 및 li 개수 분석
+            stats_js = """
+            () => {
+                const listEl = document.querySelector("ul.novel-eps, [class*='novel-eps'], ul[id*='novel-episode-list']");
+                const lis = listEl ? Array.from(listEl.querySelectorAll("li")) : Array.from(document.querySelectorAll("ul.novel-eps li"));
+                let maxEp = 0;
+                let minEp = 99999999;
+                let hasEp1 = false;
+
+                lis.forEach((li) => {
+                    const txt = li.innerText || li.textContent || "";
+                    if (txt.includes(" 1화") || txt.startsWith("1화") || txt.includes("1화 -") || txt.includes("1화:") || txt.includes("제 1화") || txt.includes("제1화")) {
+                        hasEp1 = true;
+                    }
+                    const m = txt.match(/(?:제\\s*)?(\\d+)\\s*화/) || txt.match(/-\\s*(\\d+)/);
+                    if (m) {
+                        const num = parseInt(m[1], 10);
+                        if (num > maxEp) maxEp = num;
+                        if (num < minEp) minEp = num;
+                        if (num === 1) hasEp1 = true;
+                    }
+                });
+
+                return {
+                    liCount: lis.length,
+                    maxEp: maxEp,
+                    minEp: minEp < 99999999 ? minEp : 0,
+                    hasEp1: hasEp1
+                };
+            }
+            """
+            init_stats = page.evaluate(stats_js) or {}
+            li_count = init_stats.get("liCount", 0)
+            max_ep = init_stats.get("maxEp", 0)
+            has_ep1 = init_stats.get("hasEp1", False)
+
+            if has_ep1:
+                _log("    [*] 이미 1화까지 전체 목록이 표시되어 있습니다. 더보기 클릭 생략.")
+                return page
+
+            # 최대 예상 클릭 횟수 산출 (통상 한 번에 50개씩 추가되므로 max_ep / 50 + 여유 5회)
+            max_clicks = 120
+            if max_ep > 0:
+                expected_clicks = (max_ep // 40) + 3
+                max_clicks = min(max_clicks, expected_clicks)
+                _log(f"    [*] 최신 회차(약 {max_ep}화) 감지 -> 예상 더보기 횟수 약 {expected_clicks}회 이내")
+
+            click_count = 0
+            no_growth_streak = 0
+            last_li_count = li_count
+
+            while click_count < max_clicks:
+                # 단 한 번의 단일 버튼 탐색 및 클릭 실행 (다중 중복 클릭 방지)
+                find_btn_js = """
+                () => {
+                    const listEl = document.querySelector("ul.novel-eps, [class*='novel-eps'], ul[id*='novel-episode-list']");
+                    const lis = listEl ? Array.from(listEl.querySelectorAll("li")) : [];
+                    let hasEp1 = false;
+                    lis.forEach((li) => {
+                        const txt = li.innerText || li.textContent || "";
+                        if (txt.includes(" 1화") || txt.startsWith("1화") || txt.includes("1화 -") || txt.includes("제 1화") || txt.includes("제1화")) {
+                            hasEp1 = true;
+                        }
+                        const m = txt.match(/(?:제\\s*)?(\\d+)\\s*화/) || txt.match(/-\\s*(\\d+)/);
+                        if (m && parseInt(m[1], 10) === 1) hasEp1 = true;
+                    });
+                    if (hasEp1) {
+                        return { action: "already_reached_first_episode" };
+                    }
+
+                    // 더보기 버튼 단일 탐색 (반드시 화면에 노출된 1개만 선택)
                     const allButtons = Array.from(document.querySelectorAll("button, a.btn"));
+                    let targetBtn = null;
                     for (const btn of allButtons) {
                         const txt = (btn.innerText || btn.textContent || "").trim();
-                        if (txt.includes("더 보기") || txt.includes("더보기") || txt.includes("이전 회차") || txt.includes("이전회차")) {
-                            candidates.push(btn);
-                        } else if (btn.classList.contains("btn--outline") && btn.closest(".adm-card")) {
-                            candidates.push(btn);
-                        }
-                    }
-
-                    for (const btn of candidates) {
-                        // 1. 요소 자체 및 조상 트리의 display, visibility, opacity, dimensions 확인
-                        let el = btn;
-                        let isHidden = false;
-                        while (el && el !== document.body && el !== document.documentElement) {
-                            const style = window.getComputedStyle(el);
-                            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
-                                isHidden = true;
-                                break;
+                        const isMatch = txt.includes("더 보기") || txt.includes("더보기") || txt.includes("이전 회차") || txt.includes("이전회차");
+                        const isOutline = btn.classList.contains("btn--outline") && (btn.closest(".adm-card") || btn.closest("section"));
+                        if (isMatch || isOutline) {
+                            // 요소 및 상위 조상 스타일 가시성 검사
+                            let el = btn;
+                            let isHidden = false;
+                            while (el && el !== document.body && el !== document.documentElement) {
+                                const style = window.getComputedStyle(el);
+                                if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                                    isHidden = true;
+                                    break;
+                                }
+                                el = el.parentElement;
                             }
-                            el = el.parentElement;
+                            if (isHidden) continue;
+
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) continue;
+                            if (btn.offsetParent === null && window.getComputedStyle(btn).position !== 'fixed') continue;
+
+                            targetBtn = btn;
+                            break;
                         }
-                        if (isHidden) continue;
-
-                        const rect = btn.getBoundingClientRect();
-                        if (rect.width === 0 || rect.height === 0) continue;
-                        if (btn.offsetParent === null && window.getComputedStyle(btn).position !== 'fixed') continue;
-
-                        // 실제 활성화되어 화면에 보이는 버튼 발견
-                        btn.scrollIntoView({ block: "center", inline: "center" });
-                        btn.click();
-                        return { clicked: true, text: btn.innerText || btn.textContent || "" };
                     }
-                    return { clicked: false };
+
+                    if (!targetBtn) {
+                        return { action: "no_button_found" };
+                    }
+
+                    targetBtn.scrollIntoView({ block: "center", inline: "center" });
+                    targetBtn.click();
+                    return { action: "clicked", currentLiCount: lis.length };
                 }
                 """
-                res = page.evaluate(find_and_click_js)
-                if not (isinstance(res, dict) and res.get("clicked")):
+                res = page.evaluate(find_btn_js) or {}
+                action = res.get("action")
+
+                if action == "already_reached_first_episode":
+                    _log("    [*] 1화가 로드되어 더보기 완료.")
+                    break
+                elif action != "clicked":
+                    _log("    [*] 이전 회차 더보기 버튼이 사라졌습니다 (전체 목록 로드 완료).")
                     break
 
                 click_count += 1
-                if click_count % 5 == 0:
-                    _log(f"    [*] 이전 회차 더보기 자동 클릭 중... ({click_count}회)")
-                page.wait_for_timeout(400)
-                if click_count >= 300:
+                # 사람이 누르는 것처럼 적절한 간격(0.9~1.3초) 대기 (서버 응답 및 DOM 갱신 대기)
+                wait_sec = random.uniform(0.95, 1.35)
+                page.wait_for_timeout(int(wait_sec * 1000))
+
+                # 클릭 후 새 회차 li가 추가되었는지 확인
+                cur_stats = page.evaluate(stats_js) or {}
+                cur_li_count = cur_stats.get("liCount", 0)
+                cur_has_ep1 = cur_stats.get("hasEp1", False)
+
+                if cur_has_ep1:
+                    _log(f"    [*] 1화 도달 확인 (총 {click_count}회 클릭, {cur_li_count}개 회차 로드 완료).")
                     break
+
+                if cur_li_count > last_li_count:
+                    no_growth_streak = 0
+                    if click_count % 3 == 0 or cur_li_count - last_li_count > 0:
+                        _log(f"    [*] 이전 회차 로딩 중... ({cur_li_count}개 회차 확보, 누적 {click_count}회 클릭)")
+                    last_li_count = cur_li_count
+                else:
+                    no_growth_streak += 1
+                    # 버튼을 눌렀는데 회차가 2회 연속 늘어나지 않고 버튼도 반응 없다면 종료
+                    if no_growth_streak >= 2:
+                        _log("    [*] 추가 회차가 더 이상 로드되지 않아 펼침을 완료합니다.")
+                        break
+
             if click_count > 0:
-                _log(f"    [*] 이전 회차 전체 펼침 완료 (총 {click_count}회 추가 로딩)")
+                _log(f"    [*] 이전 회차 전체 펼침 완료 (총 {click_count}회 로딩 완료)")
         except Exception as e:
             _log(f"    [*] 더보기 버튼 처리 알림: {e}")
         return page
@@ -618,7 +731,7 @@ def _interruptible_sleep(secs, should_stop):
         time.sleep(min(0.3, end - time.time()))
 
 
-def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should_stop=None):
+def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should_stop=None, on_title_detected=None):
     """소설 목록 페이지(모든 페이징 포함)에서 챕터 목록을 수집."""
     _log = log or (lambda m: None)
     novel_id = parse_novel_id(list_url)
@@ -657,6 +770,16 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
     detected_title = None
     detected_cover_url = None
 
+    def _handle_title(t):
+        nonlocal detected_title
+        if t and not detected_title:
+            detected_title = t
+            if on_title_detected:
+                try:
+                    on_title_detected(t)
+                except Exception:
+                    pass
+
     while pending_pages or pages_to_process:
         if pages_to_process:
             page_url, page = pages_to_process.pop(0)
@@ -667,7 +790,7 @@ def extract_chapters(session_or_page, list_url, solve_cf=False, log=None, should
             visited_pages.add(page_url)
             if should_stop and should_stop():
                 raise StopScrape()
-            list_action = make_list_page_action(log=_log) if not hasattr(session_or_page, "css") else None
+            list_action = make_list_page_action(log=_log, on_title_detected=_handle_title) if not hasattr(session_or_page, "css") else None
             page = fetch_with_retry(session_or_page, page_url, page_action=list_action,
                                     solve_cf=solve_cf, log=_log, should_stop=should_stop)
 
@@ -1670,7 +1793,7 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
     blocked_msg = None
     with StealthySession(**session_kwargs) as session:
         log(f"[*] 목록 로딩: {url}")
-        ext_res = extract_chapters(session, url, solve_cf=solve_cf, log=log, should_stop=should_stop)
+        ext_res = extract_chapters(session, url, solve_cf=solve_cf, log=log, should_stop=should_stop, on_title_detected=on_title_detected)
         if len(ext_res) == 3:
             chapters, detected_title, detected_cover_url = ext_res
         else:

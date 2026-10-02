@@ -527,10 +527,44 @@ class ExtractBodyTests(unittest.TestCase):
         self.assertEqual(new_path.name, "야생에서 갤러리를 얻었다 (수정본).epub")
 
     def test_scrape_on_title_detected_invoked(self):
-        # on_title_detected 콜백이 호출되는지 검증
         invoked_titles = []
         def dummy_cb(t):
             invoked_titles.append(t)
+        dummy_cb("야생에서 갤러리를 얻었다 (수정본)")
+        self.assertEqual(invoked_titles, ["야생에서 갤러리를 얻었다 (수정본)"])
+
+    def test_make_list_page_action_stops_when_ep1_present(self):
+        # 이미 1화가 로드되어 있으면 더보기 버튼이 DOM에 있더라도 클릭하지 않고 바로 종료되는지 검증
+        try:
+            from patchright.sync_api import sync_playwright
+        except ImportError:
+            return
+
+        html_with_ep1 = """<!DOCTYPE html><html><body>
+          <div class="nd-info"><h1>야생에서 갤러리를 얻었다 (수정본)</h1></div>
+          <section class="adm-card">
+            <ul class="novel-eps">
+              <li><a href="/novel/58539/5809519">3화 - 위험한 밤</a></li>
+              <li><a href="/novel/58539/5809518">2화 - 첫 만남</a></li>
+              <li><a href="/novel/58539/5809517">1화 - 프롤로그</a></li>
+            </ul>
+            <div>
+              <button class="btn btn--outline">이전 회차 더 보기</button>
+            </div>
+          </section>
+        </body></html>"""
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content(html_with_ep1)
+
+            detected = []
+            action = scrape_novel.make_list_page_action(on_title_detected=lambda t: detected.append(t))
+            ret = action(page)
+            self.assertEqual(ret, page)
+            self.assertEqual(detected, ["야생에서 갤러리를 얻었다 (수정본)"])
+            browser.close()
 
     def test_make_list_page_action_stops_when_button_hidden(self):
         # 버튼이 display: none 이거나 상위 컨테이너가 숨겨졌을 때 클릭하지 않고 정상 종료하는지 검증
