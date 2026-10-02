@@ -219,7 +219,7 @@ class ScraperGUI:
         self.headful = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="창 표시", variable=self.headful).grid(
             row=1, column=3, sticky="w", padx=8)
-        self.solve_cf = tk.BooleanVar(value=False)
+        self.solve_cf = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="CF 우회", variable=self.solve_cf).grid(
             row=1, column=4, sticky="w", padx=8)
         self.auto_quota_retry = tk.BooleanVar(value=True)

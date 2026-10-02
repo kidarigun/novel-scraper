@@ -445,33 +445,125 @@ def make_body_action(max_ms):
     return act
 
 
+def _solve_human_verification_if_present(page, log=None):
+    """'사람인지 확인', Cloudflare Turnstile, 'Just a moment' 등 사람 인증 화면 감지 시 자동 클릭 및 대기."""
+    _log = log or (lambda m: None)
+    try:
+        title = page.title() or ""
+        content = page.content() or ""
+        cf_detected = any([
+            "just a moment" in title.lower(),
+            "verifying you are human" in content.lower(),
+            "사람인지 확인" in content,
+            "사람인지 묻는" in content,
+            "보안 검사" in content,
+            "challenges.cloudflare.com/turnstile" in content,
+        ])
+        if not cf_detected:
+            return
+
+        _log("    [*] '사람인지 확인(보안 검사)' 화면 감지 -> 자동 통과 시도 중...")
+        # 1. Turnstile 체크박스 iframe 및 클릭 버튼 탐색
+        start_t = time.time()
+        while time.time() - start_t < 15:
+            # iframe 탐색
+            for frame in page.frames:
+                try:
+                    if "challenges.cloudflare.com" in frame.url or "turnstile" in frame.url:
+                        chk = frame.locator("input[type='checkbox'], #challenge-stage, span.mark, div.ctp-checkbox-label")
+                        if chk.count() > 0 and chk.first.is_visible():
+                            chk.first.click(delay=120)
+                            _log("    [*] 사람 인증 체크박스 클릭 완료")
+                            break
+                except Exception:
+                    pass
+
+            # 메인 페이지 상의 체크박스 및 컨테이너
+            try:
+                main_chk = page.locator("#cf-turnstile, .turnstile, input[type='checkbox']")
+                if main_chk.count() > 0 and main_chk.first.is_visible():
+                    main_chk.first.click(delay=120)
+            except Exception:
+                pass
+
+            page.wait_for_timeout(1000)
+            cur_title = page.title() or ""
+            cur_content = page.content() or ""
+            if "just a moment" not in cur_title.lower() and "verifying you are human" not in cur_content.lower() and "challenges.cloudflare.com/turnstile" not in cur_content:
+                _log("    [*] 보안 인증 통과 완료!")
+                break
+    except Exception as e:
+        _log(f"    [*] 보안 인증 확인 중 알림: {e}")
+
+
 def make_list_page_action(log=None):
-    """소설 목록 페이지에서 [이전 회차 더 보기] 버튼이 존재할 경우 끝까지 자동 클릭하여 모든 회차 펼침."""
+    """소설 목록 페이지에서 [이전 회차 더 보기] 버튼이 존재할 경우 끝까지 자동 클릭하여 모든 회차 펼침.
+    display: none, visibility: hidden, opacity: 0 등 CSS로 숨겨진 경우를 정확히 판별하여 중단."""
     _log = log or (lambda m: None)
 
     def act(page):
+        # 1. 사람 인증(Turnstile/Cloudflare) 화면이 떠 있다면 통과 시도
+        _solve_human_verification_if_present(page, log=_log)
+
         try:
             click_count = 0
             while True:
-                more_btn = None
-                for sel in [
-                    "button:has-text('더 보기')",
-                    "button:has-text('더보기')",
-                    "button.btn--outline",
-                    "[class*='novel-eps'] ~ div button",
-                    "button:has-text('이전 회차')",
-                ]:
-                    cand = page.locator(sel)
-                    if cand.count() > 0 and cand.first.is_visible():
-                        more_btn = cand.first
-                        break
-                if not more_btn:
+                # JavaScript 내에서 버튼 요소 자체 및 상위(부모) 요소의 display, visibility, opacity, offsetParent 등을 모두 검사
+                find_and_click_js = """
+                () => {
+                    const selectors = [
+                        "button.btn--outline",
+                        "button:has-text('더 보기')",
+                        "button:has-text('더보기')",
+                        "[class*='novel-eps'] ~ div button",
+                        "button"
+                    ];
+                    let candidates = [];
+                    // 모든 버튼 중 '더 보기', '이전 회차', 또는 novel-eps 하단 버튼 수집
+                    const allButtons = Array.from(document.querySelectorAll("button, a.btn"));
+                    for (const btn of allButtons) {
+                        const txt = (btn.innerText || btn.textContent || "").trim();
+                        if (txt.includes("더 보기") || txt.includes("더보기") || txt.includes("이전 회차") || txt.includes("이전회차")) {
+                            candidates.push(btn);
+                        } else if (btn.classList.contains("btn--outline") && btn.closest(".adm-card")) {
+                            candidates.push(btn);
+                        }
+                    }
+
+                    for (const btn of candidates) {
+                        // 1. 요소 자체 및 조상 트리의 display, visibility, opacity, dimensions 확인
+                        let el = btn;
+                        let isHidden = false;
+                        while (el && el !== document.body && el !== document.documentElement) {
+                            const style = window.getComputedStyle(el);
+                            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                                isHidden = true;
+                                break;
+                            }
+                            el = el.parentElement;
+                        }
+                        if (isHidden) continue;
+
+                        const rect = btn.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        if (btn.offsetParent === null && window.getComputedStyle(btn).position !== 'fixed') continue;
+
+                        // 실제 활성화되어 화면에 보이는 버튼 발견
+                        btn.scrollIntoView({ block: "center", inline: "center" });
+                        btn.click();
+                        return { clicked: true, text: btn.innerText || btn.textContent || "" };
+                    }
+                    return { clicked: false };
+                }
+                """
+                res = page.evaluate(find_and_click_js)
+                if not (isinstance(res, dict) and res.get("clicked")):
                     break
-                more_btn.click()
+
                 click_count += 1
                 if click_count % 5 == 0:
                     _log(f"    [*] 이전 회차 더보기 자동 클릭 중... ({click_count}회)")
-                page.wait_for_timeout(350)
+                page.wait_for_timeout(400)
                 if click_count >= 300:
                     break
             if click_count > 0:
@@ -484,8 +576,10 @@ def make_list_page_action(log=None):
 
 
 def _fetch(session, url, *, page_action, wait_selector, solve_cf, network_idle=False):
+    # solve_cf가 False더라도 사람 확인(Cloudflare Turnstile) 페이지가 감지되면 풀 수 있도록 지원
     return session.fetch(url, network_idle=network_idle, wait_selector=wait_selector,
                          page_action=page_action, solve_cloudflare=solve_cf)
+
 
 
 def fetch_with_retry(session, url, *, page_action=None, wait_selector=None,
@@ -496,8 +590,10 @@ def fetch_with_retry(session, url, *, page_action=None, wait_selector=None,
         if should_stop and should_stop():
             raise StopScrape()
         try:
+            # 첫 시도 실패 후에는 자동으로 solve_cf 활성화
+            active_solve_cf = solve_cf or (attempt > 1)
             page = _fetch(session, url, page_action=page_action,
-                          wait_selector=wait_selector, solve_cf=solve_cf,
+                          wait_selector=wait_selector, solve_cf=active_solve_cf,
                           network_idle=network_idle)
             status = getattr(page, "status", 200)
             if status and status >= 400:

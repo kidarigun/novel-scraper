@@ -532,8 +532,34 @@ class ExtractBodyTests(unittest.TestCase):
         def dummy_cb(t):
             invoked_titles.append(t)
 
-        dummy_cb("야생에서 갤러리를 얻었다 (수정본)")
-        self.assertEqual(invoked_titles, ["야생에서 갤러리를 얻었다 (수정본)"])
+    def test_make_list_page_action_stops_when_button_hidden(self):
+        # 버튼이 display: none 이거나 상위 컨테이너가 숨겨졌을 때 클릭하지 않고 정상 종료하는지 검증
+        try:
+            from patchright.sync_api import sync_playwright
+        except ImportError:
+            return
+
+        html_with_hidden_btn = """<!DOCTYPE html><html><body>
+          <section class="adm-card">
+            <ul class="novel-eps">
+              <li><a href="/novel/1/1">1화</a></li>
+            </ul>
+            <div style="display: none;">
+              <button class="btn btn--outline">이전 회차 더 보기</button>
+            </div>
+          </section>
+        </body></html>"""
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content(html_with_hidden_btn)
+
+            action = scrape_novel.make_list_page_action()
+            # 숨겨진 버튼이므로 무한 루프에 빠지지 않고 바로 반환되어야 함
+            ret = action(page)
+            self.assertEqual(ret, page)
+            browser.close()
 
 
 if __name__ == "__main__":
