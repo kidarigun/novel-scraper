@@ -537,13 +537,13 @@ def _solve_human_verification_if_present(page, log=None):
         _log(f"    [*] 보안 인증 확인 중 알림: {e}")
 
 
-def make_toki_list_page_action(log=None, on_title_detected=None):
+def make_toki_list_page_action(log=None, on_title_detected=None, result_container=None):
     """toki32 등 SPA 소설 목록 페이지 전용 [이전 회차 더 보기] 클릭 및 회차 수집 action.
     - 시작 전 제목부터 즉시 추출하여 콜백으로 전달
     - 100화 단위 로딩 기반으로 필요한 클릭 횟수 정확히 추론
-    - 사람처럼 자연스러운 간격(1.05~1.35초)으로 1회씩 클릭
+    - 클릭 후 li 개수가 늘어날 때까지 능동적으로 대기(Active wait)
     - 1화 도달 또는 버튼 사라짐/숨김 감지 시 즉시 중단
-    - 클릭 완료 후 브라우저 DOM에서 ul.novel-eps li a 목록을 직접 JSON으로 완전하게 추출
+    - 클릭 완료 후 브라우저 DOM에서 ul.novel-eps li a 목록을 직접 JSON으로 완전하게 추출하여 result_container에 보관
     """
     _log = log or (lambda m: None)
 
@@ -587,7 +587,8 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
                 let hasEp1 = false;
 
                 lis.forEach((li) => {
-                    const txt = li.innerText || li.textContent || "";
+                    const txt = (li.innerText || li.textContent || "").trim();
+                    if (/^<*\\s*(?:이전화|다음화|목록)\\s*>*$/.test(txt)) return;
                     if (txt.includes(" 1화") || txt.startsWith("1화") || txt.includes("1화 -") || txt.includes("1화:") || txt.includes("제 1화") || txt.includes("제1화")) {
                         hasEp1 = true;
                     }
@@ -619,7 +620,7 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
                 # 100화 단위 로딩 기반 예상 클릭 수 산출
                 remaining = max_ep - li_count
                 expected_clicks = max(1, (remaining + 99) // 100) if remaining > 0 else 1
-                max_clicks = min(expected_clicks + 2, 45)
+                max_clicks = min(expected_clicks + 3, 50)
                 _log(f"    [*] 최신 회차(약 {max_ep}화, 현재 {li_count}개) 감지 (100화 단위 로드) -> 예상 더보기 횟수 약 {expected_clicks}회 이내")
 
                 click_count = 0
@@ -627,14 +628,14 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
                 last_li_count = li_count
 
                 while click_count < max_clicks:
-                    # 단 한 번의 단일 버튼 탐색 및 클릭 실행 (다중 중복 클릭 방지)
                     find_btn_js = """
                     () => {
                         const listEl = document.querySelector("ul.novel-eps, [class*='novel-eps'], ul[id*='novel-episode-list']");
                         const lis = listEl ? Array.from(listEl.querySelectorAll("li")) : [];
                         let hasEp1 = false;
                         lis.forEach((li) => {
-                            const txt = li.innerText || li.textContent || "";
+                            const txt = (li.innerText || li.textContent || "").trim();
+                            if (/^<*\\s*(?:이전화|다음화|목록)\\s*>*$/.test(txt)) return;
                             if (txt.includes(" 1화") || txt.startsWith("1화") || txt.includes("1화 -") || txt.includes("제 1화") || txt.includes("제1화")) {
                                 hasEp1 = true;
                             }
@@ -653,7 +654,6 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
                             const isMatch = txt.includes("더 보기") || txt.includes("더보기") || txt.includes("이전 회차") || txt.includes("이전회차");
                             const isOutline = btn.classList.contains("btn--outline") && (btn.closest(".adm-card") || btn.closest("section"));
                             if (isMatch || isOutline) {
-                                // 요소 및 상위 조상 스타일 가시성 검사 (display:none 등 완벽 필터링)
                                 let el = btn;
                                 let isHidden = false;
                                 while (el && el !== document.body && el !== document.documentElement) {
@@ -695,12 +695,22 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
                         break
 
                     click_count += 1
-                    # 사람처럼 적절한 간격(1.05~1.35초) 대기 (서버 응답 및 DOM 갱신 대기)
-                    wait_sec = random.uniform(1.05, 1.35)
-                    page.wait_for_timeout(int(wait_sec * 1000))
 
-                    # 클릭 후 새 회차 li가 추가되었는지 확인
-                    cur_stats = page.evaluate(stats_js) or {}
+                    # 클릭 후 서버 응답 및 DOM 갱신 대기 (최대 5.5초 동안 li 개수 증가 능동 감시)
+                    wait_start = time.time()
+                    grew = False
+                    cur_stats = {}
+                    while time.time() - wait_start < 5.5:
+                        page.wait_for_timeout(350)
+                        cur_stats = page.evaluate(stats_js) or {}
+                        cur_li_count = cur_stats.get("liCount", 0)
+                        cur_has_ep1 = cur_stats.get("hasEp1", False)
+                        if cur_has_ep1:
+                            break
+                        if cur_li_count > last_li_count:
+                            grew = True
+                            break
+
                     cur_li_count = cur_stats.get("liCount", 0)
                     cur_has_ep1 = cur_stats.get("hasEp1", False)
 
@@ -708,13 +718,15 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
                         _log(f"    [*] 1화 도달 확인 (총 {click_count}회 클릭, {cur_li_count}개 회차 로드 완료).")
                         break
 
-                    if cur_li_count > last_li_count:
+                    if grew or cur_li_count > last_li_count:
                         no_growth_streak = 0
                         _log(f"    [*] 이전 회차 로딩 중... ({cur_li_count}개 회차 확보, 누적 {click_count}회 클릭)")
                         last_li_count = cur_li_count
+                        # 자연스러운 클릭 간격 유지 (0.9~1.2초 휴식)
+                        page.wait_for_timeout(int(random.uniform(0.9, 1.25) * 1000))
                     else:
                         no_growth_streak += 1
-                        if no_growth_streak >= 2:
+                        if no_growth_streak >= 3:
                             _log("    [*] 추가 회차가 더 이상 로드되지 않아 펼침을 완료합니다.")
                             break
 
@@ -737,10 +749,16 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
                     if (!m) continue;
                     const eid = parseInt(m[1], 10);
                     if (seen.has(eid)) continue;
-                    seen.add(eid);
 
                     let title = (a.innerText || a.textContent || "").trim();
                     title = title.replace(/\\s+/g, " ");
+
+                    // 이전화/다음화/목록 등 네비게이션 버튼 텍스트 필터링
+                    if (/^<*\\s*(?:이전화|다음화|목록|전체보기)\\s*>*$/i.test(title)) {
+                        continue;
+                    }
+
+                    seen.add(eid);
                     const numM = title.match(/(?:제\\s*)?(\\d+)\\s*화/) || title.match(/-\\s*(\\d+)/);
                     const no = numM ? parseInt(numM[1], 10) : null;
                     chapters.push({
@@ -773,6 +791,8 @@ def make_toki_list_page_action(log=None, on_title_detected=None):
             }
             """
             dom_data = page.evaluate(extract_dom_js) or {}
+            if result_container is not None and isinstance(result_container, dict):
+                result_container.update(dom_data)
             setattr(page, "_toki_extracted_data", dom_data)
         except Exception as e:
             _log(f"    [*] toki32 더보기/추출 처리 알림: {e}")
@@ -986,15 +1006,16 @@ def extract_chapters_toki_app(session_or_page, list_url, solve_cf=False, log=Non
                 except Exception:
                     pass
 
+    result_container = {}
     if hasattr(session_or_page, "css"):
         page = session_or_page
     else:
-        toki_action = make_toki_list_page_action(log=_log, on_title_detected=_handle_title)
+        toki_action = make_toki_list_page_action(log=_log, on_title_detected=_handle_title, result_container=result_container)
         page = fetch_with_retry(session_or_page, clean_list_url, page_action=toki_action,
                                 solve_cf=solve_cf, log=_log, should_stop=should_stop)
 
     # 1. 브라우저에서 직접 추출된 DOM 데이터 확인 (Scrapling 정적 파싱 누락 원천 방지)
-    dom_data = getattr(page, "_toki_extracted_data", None)
+    dom_data = result_container if result_container.get("chapters") else getattr(page, "_toki_extracted_data", None)
     items = []
     if dom_data and isinstance(dom_data, dict):
         raw_items = dom_data.get("chapters", [])
@@ -1014,11 +1035,14 @@ def extract_chapters_toki_app(session_or_page, list_url, solve_cf=False, log=Non
             m = href_pat.search(href)
             if not m:
                 continue
+            title = re.sub(r"\s+", " ", (a.get_all_text() or "").strip())
+            # 이전화/다음화/목록 등 네비게이션 버튼 링크 제외
+            if re.match(r"^<*\s*(?:이전화|다음화|목록|전체보기)\s*>*$", title, re.I):
+                continue
             eid = m.group(1)
             if eid in seen_eids:
                 continue
             seen_eids.add(eid)
-            title = re.sub(r"\s+", " ", (a.get_all_text() or "").strip())
             full_url = urllib.parse.urljoin(clean_list_url, href)
             num_m = re.search(r"(?:제\s*)?(\d+)\s*화", title) or re.search(r"-\s*(\d+)", title)
             items.append({
@@ -1027,6 +1051,9 @@ def extract_chapters_toki_app(session_or_page, list_url, solve_cf=False, log=Non
                 "title": title,
                 "url": full_url
             })
+
+    # 네비게이션 버튼 텍스트 추가 필터링
+    items = [it for it in items if not re.match(r"^<*\s*(?:이전화|다음화|목록|전체보기)\s*>*$", it.get("title", ""), re.I)]
 
     if not detected_title:
         t_el = (page.css(".nd-info h1") or
