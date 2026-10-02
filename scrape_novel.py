@@ -454,13 +454,32 @@ def make_body_action(max_ms, site_type=None):
                                     lines.append(t)
                             if lines and len(SEP.join(lines)) >= 50:
                                 text = SEP.join(lines)
-                                setattr(page, "_extracted_novel_data", {
+                                data_res = {
                                     "ok": True,
                                     "state": "ok",
                                     "source": sel,
                                     "length": len(text),
                                     "text": text,
-                                })
+                                }
+                                setattr(page, "_extracted_novel_data", data_res)
+                                try:
+                                    page.evaluate("""
+                                    (res) => {
+                                        try {
+                                            const target = document.getElementById('extracted-novel-text') ||
+                                              document.body.appendChild(document.createElement('div'));
+                                            target.id = 'extracted-novel-text';
+                                            target.style.cssText = 'position:fixed;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden';
+                                            target.textContent = res.text;
+                                            target.dataset.ok = res.ok ? '1' : '0';
+                                            target.dataset.state = res.state;
+                                            target.dataset.source = res.source;
+                                            target.dataset.length = String(res.length);
+                                        } catch (e) {}
+                                    }
+                                    """, data_res)
+                                except Exception:
+                                    pass
                                 return page
                 except Exception:
                     pass
@@ -646,14 +665,14 @@ def make_toki_list_page_action(log=None, on_title_detected=None, result_containe
                             return { action: "already_reached_first_episode" };
                         }
 
-                        // 더보기 버튼 단일 탐색 (반드시 화면에 노출된 1개만 선택)
-                        const allButtons = Array.from(document.querySelectorAll("button, a.btn"));
+                        // 더보기 버튼 단일 탐색 (반드시 실제 button 요소이며 텍스트에 더보기/이전 회차가 들어있는 것만 선택)
+                        const allButtons = Array.from(document.querySelectorAll("button"));
                         let targetBtn = null;
                         for (const btn of allButtons) {
                             const txt = (btn.innerText || btn.textContent || "").trim();
-                            const isMatch = txt.includes("더 보기") || txt.includes("더보기") || txt.includes("이전 회차") || txt.includes("이전회차");
-                            const isOutline = btn.classList.contains("btn--outline") && (btn.closest(".adm-card") || btn.closest("section"));
-                            if (isMatch || isOutline) {
+                            // 텍스트가 정확히 '이전 회차' 또는 '더 보기'를 포함해야 함 (네비게이션 링크 절대 제외)
+                            const isMatch = txt.includes("이전 회차") || txt.includes("이전회차") || txt.includes("더 보기") || txt.includes("더보기");
+                            if (isMatch) {
                                 let el = btn;
                                 let isHidden = false;
                                 while (el && el !== document.body && el !== document.documentElement) {
@@ -752,6 +771,12 @@ def make_toki_list_page_action(log=None, on_title_detected=None, result_containe
 
                     let title = (a.innerText || a.textContent || "").trim();
                     title = title.replace(/\\s+/g, " ");
+
+                    // "1화 1화" 또는 "300화 300화" 와 같은 중복 텍스트 정제
+                    const dupMatch = title.match(/^(.+?)\\s+\\1$/);
+                    if (dupMatch) {
+                        title = dupMatch[1];
+                    }
 
                     // 이전화/다음화/목록 등 네비게이션 버튼 텍스트 필터링
                     if (/^<*\\s*(?:이전화|다음화|목록|전체보기)\\s*>*$/i.test(title)) {
@@ -1084,6 +1109,12 @@ def extract_chapters_toki_app(session_or_page, list_url, solve_cf=False, log=Non
 
     # toki32는 목록이 최신화부터 1화까지 내림차순으로 렌더링되므로,
     # 1화부터 순서대로 읽기 위해 목록을 역순으로 뒤집어 오름차순으로 정렬
+    for it in items:
+        t = it.get("title", "")
+        m_dup = re.match(r"^(.+?)\s+\1$", t)
+        if m_dup:
+            it["title"] = m_dup.group(1)
+
     items = list(reversed(items))
     if all(it.get("no") is not None for it in items):
         items.sort(key=lambda it: it["no"])
