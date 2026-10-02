@@ -595,8 +595,93 @@ class ExtractBodyTests(unittest.TestCase):
             self.assertEqual(ret, page)
             browser.close()
 
+    def test_site_type_detection(self):
+        self.assertEqual(scrape_novel.detect_site_type("https://toki32.com/novel/58539"), scrape_novel.SITE_TOKI_APP)
+        self.assertEqual(scrape_novel.detect_site_type("https://toki32.com/novel/58539/5809517"), scrape_novel.SITE_TOKI_APP)
+        self.assertEqual(scrape_novel.detect_site_type("https://newtoki1.org/novel/12345"), scrape_novel.SITE_LEGACY_NEWTOKI)
+        self.assertEqual(scrape_novel.detect_site_type("https://booktoki300.com/novel/999"), scrape_novel.SITE_LEGACY_NEWTOKI)
+
+    def test_normalize_novel_list_url(self):
+        self.assertEqual(
+            scrape_novel.normalize_novel_list_url("https://toki32.com/novel/58539/5809517"),
+            "https://toki32.com/novel/58539"
+        )
+        self.assertEqual(
+            scrape_novel.normalize_novel_list_url("https://toki32.com/novel/58539"),
+            "https://toki32.com/novel/58539"
+        )
+        self.assertEqual(
+            scrape_novel.normalize_novel_list_url("https://newtoki1.org/novel/12345?epage=4"),
+            "https://newtoki1.org/novel/12345?epage=4"
+        )
+
+    def test_extract_chapters_legacy_newtoki_preserves_order(self):
+        # 기존 newtoki 사이트는 episode_id 오름차순으로 정렬되어야 함
+        mock_page = _Page({
+            "a": [
+                _Element("2화", {"href": "/novel/100/202"}),
+                _Element("1화", {"href": "/novel/100/201"}),
+                _Element("3화", {"href": "/novel/100/203"}),
+            ],
+            ".page-title": [_Element("레거시 소설 제목 - 뉴토끼")],
+        })
+        items, title, cover = scrape_novel.extract_chapters_legacy_newtoki(mock_page, "https://newtoki1.org/novel/100")
+        self.assertEqual(title, "레거시 소설 제목")
+        self.assertEqual([it["episode_id"] for it in items], [201, 202, 203])
+        self.assertEqual(items[0]["title"], "1화")
+
+    def test_extract_chapters_toki_app_preserves_story_order(self):
+        # toki32 사이트는 목록이 내림차순(최신화 상단)으로 렌더링되므로,
+        # 1화부터 최신화까지 연재 순서(오름차순)로 뒤집어져야 함
+        mock_page = _Page({
+            "a": [
+                _Element("3화", {"href": "/novel/58539/300"}),
+                _Element("2화", {"href": "/novel/58539/200"}),
+                _Element("1화", {"href": "/novel/58539/100"}),
+            ],
+            ".nd-info h1": [_Element("토키 소설 제목")],
+        })
+        items, title, cover = scrape_novel.extract_chapters_toki_app(mock_page, "https://toki32.com/novel/58539")
+        self.assertEqual(title, "토키 소설 제목")
+        self.assertEqual([it["no"] for it in items], [1, 2, 3])
+        self.assertEqual([it["episode_id"] for it in items], [100, 200, 300])
+
+    def test_extract_chapters_toki_app_uses_dom_extracted_data(self):
+        # 브라우저에서 page._toki_extracted_data 가 생성되어 있는 경우 최우선 사용
+        mock_page = _Page({})
+        setattr(mock_page, "_toki_extracted_data", {
+            "chapters": [
+                {"episode_id": 842, "no": 842, "title": "842화 (완결)", "url": "https://toki32.com/novel/58539/842"},
+                {"episode_id": 841, "no": 841, "title": "841화", "url": "https://toki32.com/novel/58539/841"},
+                {"episode_id": 1, "no": 1, "title": "1화", "url": "https://toki32.com/novel/58539/1"},
+            ],
+            "title": "842화 대작 소설",
+            "cover": "https://toki32.com/cover.jpg",
+        })
+        items, title, cover = scrape_novel.extract_chapters_toki_app(mock_page, "https://toki32.com/novel/58539/5809517")
+        self.assertEqual(title, "842화 대작 소설")
+        self.assertEqual(cover, "https://toki32.com/cover.jpg")
+        self.assertEqual(len(items), 3)
+        # 1화부터 순서대로 정렬되었는지 확인
+        self.assertEqual(items[0]["no"], 1)
+        self.assertEqual(items[-1]["no"], 842)
+
+    def test_extract_chapters_dispatcher_normalizes_episode_url(self):
+        # 회차 뷰어 URL(5809517)이 들어와도 extract_chapters가 정상 정규화하여 처리
+        mock_page = _Page({})
+        setattr(mock_page, "_toki_extracted_data", {
+            "chapters": [{"episode_id": 1, "no": 1, "title": "1화", "url": "https://toki32.com/novel/58539/1"}],
+            "title": "테스트 소설",
+            "cover": "",
+        })
+        items, title, _ = scrape_novel.extract_chapters(mock_page, "https://toki32.com/novel/58539/5809517")
+        self.assertEqual(title, "테스트 소설")
+        self.assertEqual(len(items), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
 
