@@ -193,11 +193,31 @@ EXTRACT_JS = r"""
 
   const tryDirectApiDecrypt = async () => {
     try {
+      let cfg = null;
       const dataEl = document.getElementById('theme-novel-viewer-data');
-      if (!dataEl) return null;
-      let cfg = {};
-      try { cfg = JSON.parse(dataEl.textContent || '{}'); } catch(e) { return null; }
-      if (!cfg.novelId || !cfg.episodeId || !cfg.token) return null;
+      if (dataEl) {
+        try { cfg = JSON.parse(dataEl.textContent || '{}'); } catch(e) {}
+      }
+      if (!cfg || !cfg.novelId || !cfg.episodeId || !cfg.token) {
+        const scripts = Array.from(document.querySelectorAll('script'));
+        for (const s of scripts) {
+          const txt = s.textContent || '';
+          if (txt.includes('token') && txt.includes('novelId')) {
+            const idxToken = txt.indexOf('token');
+            if (idxToken !== -1) {
+              const sub = txt.slice(Math.max(0, idxToken - 250), idxToken + 350);
+              const mNov = sub.match(/novelId[^\w\d]*(\d+)/);
+              const mEp = sub.match(/episodeId[^\w\d]*(\d+)/);
+              const mTok = sub.match(/token[\\":\s]+([A-Za-z0-9_\-\.]+)/);
+              if (mNov && mEp && mTok) {
+                cfg = { novelId: mNov[1], episodeId: mEp[1], token: mTok[1] };
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (!cfg || !cfg.novelId || !cfg.episodeId || !cfg.token) return null;
 
       function toB64Url(bytes) {
         let bin = "";
@@ -434,56 +454,59 @@ def make_body_action(max_ms, site_type=None):
         start_time = time.time()
         deadline = start_time + (max_ms / 1000.0)
 
-        # 1. toki_app 사이트 전용 또는 site_type 미지정 시 closed shadow DOM 피어싱 탐색
+        # 1. 초고속 인페이지 API 복호화 및 DOM 추출 (0.1~0.5초 이내 완료)
+        try:
+            remaining_ms = max(200, int((deadline - time.time()) * 1000))
+            res = page.evaluate(EXTRACT_JS, min(1000, remaining_ms))
+            if isinstance(res, dict) and res.get("ok"):
+                setattr(page, "_extracted_novel_data", res)
+                return page
+        except Exception:
+            pass
+
+        # 2. toki_app 사이트 전용 또는 site_type 미지정 시 closed shadow DOM 피어싱 탐색
         if site_type == SITE_TOKI_APP or site_type is None:
             while time.time() < deadline:
                 try:
-                    for sel in [
-                        "article.novel-viewer p",
-                        ".novel-viewer p",
-                        "article.novel-viewer >> p",
-                        "[class*='novel-viewer'] p",
-                    ]:
-                        loc = page.locator(sel)
-                        count = loc.count()
-                        if count > 0:
-                            lines = []
-                            for i in range(count):
-                                t = loc.nth(i).inner_text().strip()
-                                if t and not any(p.search(t) for p in JUNK_PATTERNS) and "댓글이 없습니다" not in t:
-                                    lines.append(t)
-                            if lines and len(SEP.join(lines)) >= 50:
-                                text = SEP.join(lines)
-                                data_res = {
-                                    "ok": True,
-                                    "state": "ok",
-                                    "source": sel,
-                                    "length": len(text),
-                                    "text": text,
-                                }
-                                setattr(page, "_extracted_novel_data", data_res)
-                                try:
-                                    page.evaluate("""
-                                    (res) => {
-                                        try {
-                                            const target = document.getElementById('extracted-novel-text') ||
-                                              document.body.appendChild(document.createElement('div'));
-                                            target.id = 'extracted-novel-text';
-                                            target.style.cssText = 'position:fixed;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden';
-                                            target.textContent = res.text;
-                                            target.dataset.ok = res.ok ? '1' : '0';
-                                            target.dataset.state = res.state;
-                                            target.dataset.source = res.source;
-                                            target.dataset.length = String(res.length);
-                                        } catch (e) {}
-                                    }
-                                    """, data_res)
-                                except Exception:
-                                    pass
-                                return page
+                    lines = page.evaluate("""() => {
+                        const ps = Array.from(document.querySelectorAll('article.novel-viewer p, .novel-viewer p, [class*="novel-viewer"] p'));
+                        return ps.map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean);
+                    }""")
+                    # 만약 일반 DOM에 p가 없다면 Playwright의 closed shadow DOM piercing locator로 탐색
+                    if not lines:
+                        for sel in ["article.novel-viewer p", ".novel-viewer p", "article.novel-viewer >> p"]:
+                            loc = page.locator(sel)
+                            c = loc.count()
+                            if c > 0:
+                                lines = [loc.nth(i).inner_text().strip() for i in range(c)]
+                                break
+
+                    if isinstance(lines, list) and lines:
+                        clean_lines = [
+                            t for t in lines
+                            if not any(p.search(t) for p in JUNK_PATTERNS) and "댓글이 없습니다" not in t
+                        ]
+                        if clean_lines and len(SEP.join(clean_lines)) >= 20:
+                            text = SEP.join(clean_lines)
+                            data_res = {
+                                "ok": True,
+                                "state": "ok",
+                                "source": "novel-viewer-p",
+                                "length": len(text),
+                                "text": text,
+                            }
+                            setattr(page, "_extracted_novel_data", data_res)
+                            return page
                 except Exception:
                     pass
                 if site_type == SITE_TOKI_APP:
+                    try:
+                        res = page.evaluate(EXTRACT_JS, 300)
+                        if isinstance(res, dict) and res.get("ok"):
+                            setattr(page, "_extracted_novel_data", res)
+                            return page
+                    except Exception:
+                        pass
                     time.sleep(0.3)
                 else:
                     break
@@ -868,8 +891,8 @@ def fetch_with_retry(session, url, *, page_action=None, wait_selector=None,
         if should_stop and should_stop():
             raise StopScrape()
         try:
-            # 첫 시도 실패 후에는 자동으로 solve_cf 활성화
-            active_solve_cf = solve_cf or (attempt > 1) or ("toki" in url)
+            # 첫 시도에는 세션 쿠키를 사용해 빠르게 요청하고, 403 차단 또는 실패 시(attempt > 1)에만 solve_cf 가동
+            active_solve_cf = solve_cf or (attempt > 1)
             page = _fetch(session, url, page_action=page_action,
                           wait_selector=wait_selector, solve_cf=active_solve_cf,
                           network_idle=network_idle)
