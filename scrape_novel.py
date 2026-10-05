@@ -1254,41 +1254,52 @@ def quick_fetch_novel_title(url, proxy=None):
         r = requests.get(url, **req_kwargs)
         if r.status_code == 200:
             html = r.text
-            # 1-1. <h1> 태그 (.nd-info h1, section.novel-detail h1 등)
-            m = re.search(r'<(?:h1)[^>]*>(.*?)<\/h1>', html, re.I | re.S)
-            if m:
-                t = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
-                t = re.sub(r"\s*완결소설.*$", "", t)
-                t = re.sub(r"\s+", " ", t).strip()
-                if t:
-                    return t
-            # 1-2. og:title
+            # 1-1. og:title (그누보드 newtoki 및 일반 웹 공통: 소설 제목이 가장 정확하게 명시됨)
             m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html)
             if m:
                 t = m.group(1).strip()
                 t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
                 t = re.sub(r"\s*완결소설.*$", "", t)
                 t = re.sub(r"\s+", " ", t).strip()
-                if t:
+                if t and not re.search(r"^(?:뉴토끼|북토끼|마나토끼|toki\d*|토끼\d*)", t, re.I):
                     return t
-            # 1-3. .page-title
+
+            # 1-2. .page-title (newtoki/그누보드 본문 헤더)
             m = re.search(r'class=["\'][^"\']*page-title[^"\']*["\'][^>]*>(.*?)<', html)
             if m:
                 t = m.group(1).strip()
                 t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
                 t = re.sub(r"\s*완결소설.*$", "", t)
                 t = re.sub(r"\s+", " ", t).strip()
-                if t:
+                if t and not re.search(r"^(?:뉴토끼|북토끼|마나토끼|toki\d*|토끼\d*)", t, re.I):
                     return t
-            # 1-4. <title>
+
+            # 1-3. 상세 컨테이너 h1 (.nd-info h1, section.novel-detail h1 등 toki_app 및 상세 전용 h1)
+            # 메인 사이트 로고 <h1>(예: <h1>뉴토끼 - 웹툰 미리보기</h1>)는 제외
+            m = re.search(r'<(?:div|section)[^>]*class=["\'][^"\']*(?:nd-info|novel-detail|novel-info)[^"\']*["\'][^>]*>[\s\S]*?<(?:h1)[^>]*>(.*?)<\/h1>', html, re.I)
+            if not m:
+                # 일반 h1 중 로고 텍스트가 아닌 경우만 허용
+                for h1_match in re.finditer(r'<(?:h1)[^>]*>(.*?)<\/h1>', html, re.I | re.S):
+                    cand = re.sub(r"<[^>]+>", "", h1_match.group(1)).strip()
+                    if not re.search(r"(?:웹툰\s*미리보기|웹툰|미리보기|사이트\s*소개)", cand):
+                        m = h1_match
+                        break
+            if m:
+                t = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
+                t = re.sub(r"\s*완결소설.*$", "", t)
+                t = re.sub(r"\s+", " ", t).strip()
+                if t and not re.search(r"^(?:뉴토끼|북토끼|마나토끼|toki\d*|토끼\d*)", t, re.I):
+                    return t
+
+            # 1-4. <title> 태그
             m = re.search(r'<title>([^<]+)</title>', html)
             if m:
                 t = m.group(1).strip()
                 t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
                 t = re.sub(r"\s*완결소설.*$", "", t)
                 t = re.sub(r"\s+", " ", t).strip()
-                if t:
+                if t and not re.search(r"^(?:뉴토끼|북토끼|마나토끼|toki\d*|토끼\d*)", t, re.I):
                     return t
     except Exception:
         pass
@@ -1300,13 +1311,12 @@ def quick_fetch_novel_title(url, proxy=None):
             if proxy:
                 browser_kwargs["proxy"] = proxy
             with StealthySession(**browser_kwargs) as session:
-                resp = session.fetch(url, timeout=12000)
+                resp = session.fetch(url, timeout=12000, solve_cloudflare=True)
                 html = resp.text or ""
-                # h1 등 파싱
                 for pat in [
-                    r'<(?:h1)[^>]*>(.*?)<\/h1>',
                     r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']',
                     r'class=["\'][^"\']*page-title[^"\']*["\'][^>]*>(.*?)<',
+                    r'<(?:div|section)[^>]*class=["\'][^"\']*(?:nd-info|novel-detail|novel-info)[^"\']*["\'][^>]*>[\s\S]*?<(?:h1)[^>]*>(.*?)<\/h1>',
                     r'<title>([^<]+)</title>'
                 ]:
                     m = re.search(pat, html, re.I | re.S)
@@ -1315,8 +1325,9 @@ def quick_fetch_novel_title(url, proxy=None):
                         t = re.sub(r"\s*-\s*(?:북토끼|뉴토끼|마나토끼|toki\d*|토끼\d*).*$", "", t, flags=re.I)
                         t = re.sub(r"\s*완결소설.*$", "", t)
                         t = re.sub(r"\s+", " ", t).strip()
-                        if t and not re.search(r"Just a moment|Cloudflare|Attention Required", t, re.I):
-                            return t
+                        if t and not re.search(r"Just a moment|Cloudflare|Attention Required|웹툰\s*미리보기", t, re.I):
+                            if not re.search(r"^(?:뉴토끼|북토끼|마나토끼|toki\d*|토끼\d*)", t, re.I):
+                                return t
         except Exception:
             pass
 
