@@ -1852,18 +1852,13 @@ def is_ongoing_novel(novel_id, cache_root=None):
 
 
 def format_ongoing_filename(base_stem: str, latest_ep: int = 0) -> str:
-    """소설 파일명(stem) 끝에 최신 화수 번호를 붙이거나 기존 번호를 갱신.
-    예:
-      '소설제목' + 150 -> '소설제목 [150화]'
-      '소설제목 [120화]' + 150 -> '소설제목 [150화]'
-      '소설제목 [120화]' + 0 -> '소설제목' (순수 제목 추출)
+    """소설 파일명(stem)에서 회차 표기를 제거하고 순수 원래 소설 제목만 반환.
+    기존에 '[150화]', '(150화)', '~150화' 등이 붙어있던 파일명도 원래 소설 제목으로 정제.
     """
     clean = re.sub(r'[\s_]*[\[\(~-]?\s*(?:\d+[-~])?\d+\s*화\s*[\]\)]?$', '', base_stem).strip()
     if not clean:
         clean = base_stem
-    if latest_ep is None or latest_ep <= 0:
-        return clean
-    return f"{clean} [{latest_ep}화]"
+    return clean
 
 
 def get_latest_done_episode(novel_id, cache_root=None):
@@ -1892,21 +1887,21 @@ def get_latest_done_episode(novel_id, cache_root=None):
     return 0
 
 
-def rename_ongoing_file(file_path, latest_ep, also_save_other=False):
-    """연재중 소설 파일(및 동시 저장된 파일)의 끝에 최신 화수를 붙여 이름을 변경.
-    성공 시 새 파일 경로(Path)를 반환하고, 실패하거나 변경이 필요 없으면 원래 경로 반환.
+def rename_ongoing_file(file_path, latest_ep=0, also_save_other=False):
+    """연재중 소설 파일(및 동시 저장된 파일)의 파일명을 원래의 소설 제목(회차 번호 제거)으로 유지/복원.
+    만약 기존 파일명에 '[150화]' 같은 회차 표기가 붙어있었다면 원래 소설 제목으로 변경.
     """
-    if not file_path or not latest_ep or latest_ep <= 0:
-        return Path(file_path) if file_path else None
+    if not file_path:
+        return None
 
     p = Path(file_path)
-    new_stem = format_ongoing_filename(p.stem, latest_ep)
+    new_stem = format_ongoing_filename(p.stem, 0)
     if new_stem == p.stem:
         return p
 
     new_path = p.with_name(f"{new_stem}{p.suffix}")
 
-    # 1. 메인 파일 rename
+    # 1. 메인 파일 rename (기존에 화수가 붙어있던 경우 원래 소설 제목으로 복원)
     if p.exists():
         try:
             if new_path.exists() and new_path.resolve() != p.resolve():

@@ -516,11 +516,9 @@ class ScraperGUI:
                 try:
                     nid = scrape_novel.parse_novel_id(url)
                     latest_ep = scrape_novel.get_latest_done_episode(nid)
-                    if latest_ep > 0:
-                        new_path = scrape_novel.rename_ongoing_file(path, latest_ep, also_save_other=also_save_other)
-                        if new_path and new_path.exists():
-                            path = str(new_path)
-                            self._log(f"[*] 연재중 파일명 최종화 갱신: {new_path.name}")
+                    new_path = scrape_novel.rename_ongoing_file(path, latest_ep, also_save_other=also_save_other)
+                    if new_path and new_path.exists():
+                        path = str(new_path)
                     final_p = Path(path)
                     novel["total"] = latest_ep if latest_ep > 0 else novel.get("total", 0)
                     novel["out_path"] = path
@@ -880,19 +878,17 @@ class ScraperGUI:
             result["ok"] = True
             result["path"] = path
 
-            # 연재중 소설 등록 및 최종화 번호 파일명 갱신
+            # 연재중 소설 등록 및 파일명 원래 소설 제목 유지
             if params.get("is_ongoing"):
                 try:
                     nid = scrape_novel.parse_novel_id(params["url"])
                     latest_ep = scrape_novel.get_latest_done_episode(nid)
-                    if latest_ep > 0:
-                        new_path = scrape_novel.rename_ongoing_file(
-                            path, latest_ep, also_save_other=params.get("also_save_other", False)
-                        )
-                        if new_path and new_path.exists():
-                            path = str(new_path)
-                            result["path"] = path
-                            self._log(f"[*] 연재중 파일명 최종화 갱신: {new_path.name}")
+                    new_path = scrape_novel.rename_ongoing_file(
+                        path, latest_ep, also_save_other=params.get("also_save_other", False)
+                    )
+                    if new_path and new_path.exists():
+                        path = str(new_path)
+                        result["path"] = path
                     final_p = Path(path)
                     scrape_novel.save_ongoing_novel({
                         "novel_id": nid,

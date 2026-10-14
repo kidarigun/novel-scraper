@@ -356,28 +356,27 @@ class ExtractBodyTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        # 1. format_ongoing_filename 검증
-        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목", 150), "소설제목 [150화]")
-        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [150화]", 180), "소설제목 [180화]")
-        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 (150화)", 180), "소설제목 [180화]")
-        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 ~150화", 180), "소설제목 [180화]")
-        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 150화", 180), "소설제목 [180화]")
-        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [1-150화]", 180), "소설제목 [180화]")
-        # 0 이하일 때 clean stem 반환 검증
+        # 1. format_ongoing_filename 검증: 항상 회차 표기 없이 원래 소설 제목 반환
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목", 150), "소설제목")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [150화]", 180), "소설제목")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 (150화)", 180), "소설제목")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 ~150화", 180), "소설제목")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 150화", 180), "소설제목")
+        self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [1-150화]", 180), "소설제목")
         self.assertEqual(scrape_novel.format_ongoing_filename("소설제목 [150화]", 0), "소설제목")
 
-        # 2. rename_ongoing_file 검증 (메인 파일 및 동시 저장 포맷)
+        # 2. rename_ongoing_file 검증 (파일명에 회차가 붙어있던 경우 원래 소설 제목으로 복원 유지)
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            epub_file = tmp / "나 혼자만 레벨업.epub"
-            txt_file = tmp / "나 혼자만 레벨업.txt"
+            epub_file = tmp / "나 혼자만 레벨업 [150화].epub"
+            txt_file = tmp / "나 혼자만 레벨업 [150화].txt"
             epub_file.write_text("fake epub", encoding="utf-8")
             txt_file.write_text("fake txt", encoding="utf-8")
 
-            # 150화로 rename
+            # rename_ongoing_file 호출 시 원래 소설 제목으로 복원
             new_path = scrape_novel.rename_ongoing_file(epub_file, 150, also_save_other=True)
-            expected_epub = tmp / "나 혼자만 레벨업 [150화].epub"
-            expected_txt = tmp / "나 혼자만 레벨업 [150화].txt"
+            expected_epub = tmp / "나 혼자만 레벨업.epub"
+            expected_txt = tmp / "나 혼자만 레벨업.txt"
 
             self.assertEqual(new_path, expected_epub)
             self.assertTrue(expected_epub.exists())
@@ -385,16 +384,11 @@ class ExtractBodyTests(unittest.TestCase):
             self.assertFalse(epub_file.exists())
             self.assertFalse(txt_file.exists())
 
-            # 180화로 추가 rename (중복 없이 [180화]로 교체)
+            # 이미 원래 소설 제목인 경우 그대로 유지
             new_path2 = scrape_novel.rename_ongoing_file(new_path, 180, also_save_other=True)
-            expected_epub2 = tmp / "나 혼자만 레벨업 [180화].epub"
-            expected_txt2 = tmp / "나 혼자만 레벨업 [180화].txt"
-
-            self.assertEqual(new_path2, expected_epub2)
-            self.assertTrue(expected_epub2.exists())
-            self.assertTrue(expected_txt2.exists())
-            self.assertFalse(expected_epub.exists())
-            self.assertFalse(expected_txt.exists())
+            self.assertEqual(new_path2, expected_epub)
+            self.assertTrue(expected_epub.exists())
+            self.assertTrue(expected_txt.exists())
 
             # 3. get_latest_done_episode 검증
             nid = "99999"
