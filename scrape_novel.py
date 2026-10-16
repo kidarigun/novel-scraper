@@ -23,6 +23,7 @@ import io
 import json
 import random
 import re
+import shutil
 import sys
 import time
 import urllib.parse
@@ -1810,8 +1811,189 @@ def get_ongoing_novels(cache_root=None):
     return []
 
 
+def format_ongoing_filename(base_stem: str, latest_ep: int = 0) -> str:
+    """소설 파일명(stem)에서 회차 표기를 제거하고 순수 원래 소설 제목만 반환.
+    기존에 '[150화]', '(150화)', '~150화' 등이 붙어있던 파일명도 원래 소설 제목으로 정제.
+    """
+    clean = re.sub(r'[\s_]*[\[\(~-]?\s*(?:\d+[-~])?\d+\s*화\s*[\]\)]?$', '', base_stem).strip()
+    if not clean:
+        clean = base_stem
+    return clean
+
+
+def _norm_title(title: str) -> str:
+    """소설 제목 매칭을 위한 정규화 (특수문자, 공백, 회차 및 태그 제거 후 소문자 변환)."""
+    if not title:
+        return ""
+    t = format_ongoing_filename(str(title), 0)
+    # [완결], (완결), [연재] 등 대괄호/소괄호 태그 제거
+    t = re.sub(r'\[[^\]]*\]|\([^\)]*\)', '', t)
+    # 영문/숫자/한글만 남김
+    cleaned = re.sub(r'[^a-zA-Z0-9가-힣]', '', t).lower()
+    return cleaned or t.strip().lower()
+
+
+def find_cache_by_title(title, exclude_nid=None, cache_root=None):
+    """정규화된 소설 제목을 기준으로 기존 캐시(가장 많은 챕터를 가진 것 우선)를 찾아 반환.
+    반환값: (old_nid, old_cache_dir, old_state) 또는 (None, None, None)
+    """
+    if not title:
+        return None, None, None
+    norm_target = _norm_title(title)
+    if not norm_target:
+        return None, None, None
+
+    roots = []
+    if cache_root:
+        roots.append(Path(cache_root))
+    else:
+        candidates = [
+            CACHE_ROOT,
+            get_app_dir() / "_cache",
+            Path.home() / ".novel_scraper_cache",
+            Path(__file__).resolve().parent / "_cache" if not getattr(sys, "frozen", False) else None
+        ]
+        for cd in candidates:
+            if cd and cd.exists() and cd not in roots:
+                roots.append(cd)
+
+    best_match = None
+    best_done_count = -1
+
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in root.iterdir():
+            if not p.is_dir():
+                continue
+            nid = p.name
+            if exclude_nid and str(nid) == str(exclude_nid):
+                continue
+            state_file = p / "state.json"
+            if not state_file.exists():
+                continue
+            try:
+                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                cached_title = state_data.get("title") or ""
+                if _norm_title(cached_title) == norm_target:
+                    done_count = len(state_data.get("done", {}))
+                    if done_count > best_done_count:
+                        best_done_count = done_count
+                        best_match = (nid, p, state_data)
+            except Exception:
+                pass
+
+    if best_match:
+        return best_match
+    return None, None, None
+
+
+def sync_cache_from_previous(current_cache_dir, current_state, chapters, old_cache_dir, old_state, log=print):
+    """
+    이전 캐시 폴더의 챕터 파일과 done 정보를 현재 캐시로 복사/병합.
+    episode_id가 변경되었을 수 있으므로 회차 순번(idx) 및 제목을 기반으로 스마트 매칭.
+    """
+    cur_chapters_dir = current_cache_dir / "chapters"
+    cur_chapters_dir.mkdir(parents=True, exist_ok=True)
+    old_chapters_dir = old_cache_dir / "chapters"
+
+    old_done = old_state.get("done", {})
+    if not old_done and not old_chapters_dir.exists():
+        return 0
+
+    old_by_idx = {}
+    old_by_title = {}
+    for ep_id, ep_info in old_done.items():
+        if isinstance(ep_info, dict):
+            idx = ep_info.get("idx")
+            t = ep_info.get("title", "")
+            if idx:
+                old_by_idx[int(idx)] = (ep_id, ep_info)
+            if t:
+                norm_t = _norm_title(t)
+                if norm_t:
+                    old_by_title[norm_t] = (ep_id, ep_info)
+
+    old_files_by_idx = {}
+    if old_chapters_dir.exists():
+        for f in old_chapters_dir.iterdir():
+            if f.is_file() and f.suffix == ".txt":
+                m = re.match(r"^(\d{4})_", f.name)
+                if m:
+                    old_files_by_idx[int(m.group(1))] = f
+
+    restored = 0
+    cur_done = current_state.setdefault("done", {})
+
+    for idx, ch in enumerate(chapters, start=1):
+        cur_key = str(ch["episode_id"])
+        cur_ch_file = cur_chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
+
+        if cur_key in cur_done and cur_ch_file.exists() and cur_ch_file.stat().st_size > 0:
+            continue
+
+        matched_ep_id = None
+        matched_info = None
+        source_file = None
+
+        if cur_key in old_done:
+            matched_ep_id = cur_key
+            matched_info = old_done[cur_key]
+
+        if not matched_info and idx in old_by_idx:
+            matched_ep_id, matched_info = old_by_idx[idx]
+
+        ch_norm = _norm_title(ch.get("title", ""))
+        if not matched_info and ch_norm and ch_norm in old_by_title:
+            matched_ep_id, matched_info = old_by_title[ch_norm]
+
+        if idx in old_files_by_idx:
+            source_file = old_files_by_idx[idx]
+        elif matched_ep_id and old_chapters_dir.exists():
+            cand = list(old_chapters_dir.glob(f"*_{matched_ep_id}.txt"))
+            if cand:
+                source_file = cand[0]
+
+        if source_file and source_file.exists() and source_file.stat().st_size > 0:
+            try:
+                shutil.copy2(source_file, cur_ch_file)
+                chars = matched_info.get("chars", 0) if matched_info else source_file.stat().st_size
+                cur_done[cur_key] = {
+                    "idx": idx,
+                    "title": ch.get("title") or (matched_info.get("title") if matched_info else ""),
+                    "chars": chars
+                }
+                restored += 1
+            except Exception:
+                pass
+
+    cur_cover = current_cache_dir / "cover.jpg"
+    old_cover = old_cache_dir / "cover.jpg"
+    if not cur_cover.exists() and old_cover.exists() and old_cover.stat().st_size > 500:
+        try:
+            shutil.copy2(old_cover, cur_cover)
+        except Exception:
+            pass
+
+    return restored
+
+
+def find_ongoing_by_title(title, cache_root=None):
+    """정규화된 제목으로 연재중 등록 소설을 찾아 반환."""
+    if not title:
+        return None
+    norm_target = _norm_title(title)
+    if not norm_target:
+        return None
+    novels = get_ongoing_novels(cache_root)
+    for n in novels:
+        if _norm_title(n.get("title", "")) == norm_target:
+            return n
+    return None
+
+
 def save_ongoing_novel(novel_info, cache_root=None):
-    """연재중 소설 추가 또는 갱신."""
+    """연재중 소설 추가 또는 갱신 (novel_id뿐만 아니라 제목 일치 시에도 기존 항목을 새 URL/novel_id로 자동 갱신)."""
     f = _ongoing_file(cache_root)
     f.parent.mkdir(parents=True, exist_ok=True)
     novels = get_ongoing_novels(cache_root)
@@ -1824,41 +2006,62 @@ def save_ongoing_novel(novel_info, cache_root=None):
     novel_info["novel_id"] = nid
     novel_info["updated_at"] = time.time()
 
-    # 중복 제거 및 최신 순 갱신
-    new_list = [n for n in novels if str(n.get("novel_id")) != nid]
+    norm_title = _norm_title(novel_info.get("title", ""))
+
+    new_list = []
+    matched_existing = None
+    for n in novels:
+        same_id = bool(nid and str(n.get("novel_id")) == nid)
+        same_title = bool(norm_title and _norm_title(n.get("title", "")) == norm_title)
+        if same_id or same_title:
+            if not matched_existing:
+                matched_existing = n
+        else:
+            new_list.append(n)
+
+    if matched_existing:
+        merged = dict(matched_existing)
+        merged.update(novel_info)
+        novel_info = merged
+
     new_list.insert(0, novel_info)
     f.write_text(json.dumps({"novels": new_list}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def remove_ongoing_novel(novel_id, cache_root=None):
-    """연재중 소설 목록에서 삭제 (완결 처리)."""
+def remove_ongoing_novel(novel_id_or_title, cache_root=None):
+    """연재중 소설 목록에서 삭제 (novel_id 또는 제목 매칭)."""
     f = _ongoing_file(cache_root)
     if not f.exists():
         return False
     novels = get_ongoing_novels(cache_root)
-    nid = str(novel_id)
-    new_list = [n for n in novels if str(n.get("novel_id")) != nid]
+    target_str = str(novel_id_or_title).strip()
+    norm_target = _norm_title(target_str)
+    new_list = []
+    for n in novels:
+        if str(n.get("novel_id")) == target_str:
+            continue
+        if norm_target and _norm_title(n.get("title", "")) == norm_target:
+            continue
+        new_list.append(n)
     if len(new_list) == len(novels):
         return False
     f.write_text(json.dumps({"novels": new_list}, ensure_ascii=False, indent=2), encoding="utf-8")
     return True
 
 
-def is_ongoing_novel(novel_id, cache_root=None):
-    """특정 소설이 연재중으로 등록되어 있는지 여부 반환."""
+def is_ongoing_novel(novel_id_or_title, cache_root=None):
+    """특정 소설이 연재중으로 등록되어 있는지 여부 반환 (novel_id 또는 소설 제목으로 확인)."""
+    if not novel_id_or_title:
+        return False
     novels = get_ongoing_novels(cache_root)
-    nid = str(novel_id)
-    return any(str(n.get("novel_id")) == nid for n in novels)
-
-
-def format_ongoing_filename(base_stem: str, latest_ep: int = 0) -> str:
-    """소설 파일명(stem)에서 회차 표기를 제거하고 순수 원래 소설 제목만 반환.
-    기존에 '[150화]', '(150화)', '~150화' 등이 붙어있던 파일명도 원래 소설 제목으로 정제.
-    """
-    clean = re.sub(r'[\s_]*[\[\(~-]?\s*(?:\d+[-~])?\d+\s*화\s*[\]\)]?$', '', base_stem).strip()
-    if not clean:
-        clean = base_stem
-    return clean
+    target_str = str(novel_id_or_title).strip()
+    norm_target = _norm_title(target_str)
+    for n in novels:
+        if str(n.get("novel_id")) == target_str:
+            return True
+        if norm_target and _norm_title(n.get("title", "")) == norm_target:
+            return True
+    return False
 
 
 def get_latest_done_episode(novel_id, cache_root=None):
@@ -2126,6 +2329,22 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
             except Exception:
                 pass
 
+        # 도메인/novel_id 변경 시 이전 캐시 이력 자동 연동/복원
+        old_nid, old_cache_dir, old_state = find_cache_by_title(novel_title, exclude_nid=novel_id)
+        if old_cache_dir and old_state:
+            restored = sync_cache_from_previous(cache_dir, state, chapters, old_cache_dir, old_state, log=log)
+            if restored > 0:
+                log(f"[*] 동일 제목('{novel_title}')의 기존 캐시(ID: {old_nid})에서 {restored}개 챕터를 연동/복원했습니다.")
+                _save_state(state_path, state, title=novel_title, url=url, total=len(chapters))
+
+        # 기존 연재 소설 등록 정보가 있다면 새 URL/novel_id로 자동 갱신
+        ongoing_info = find_ongoing_by_title(novel_title)
+        if ongoing_info:
+            ongoing_info["novel_id"] = novel_id
+            ongoing_info["url"] = url
+            ongoing_info["title"] = novel_title
+            save_ongoing_novel(ongoing_info)
+
         # 표지 이미지 로드 및 다운로드
         cover_path = cache_dir / "cover.jpg"
         cover_bytes = None
@@ -2148,8 +2367,25 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
             if is_placeholder and not re.match(r"^소설_\d+$", novel_title):
                 final_path = final_path.with_name(f"{safe_name}{final_path.suffix}")
         else:
-            base = Path(out_dir) if out_dir else Path(__file__).resolve().parent
-            final_path = base / f"{_safe_filename(novel_title)}.txt"
+            if ongoing_info and ongoing_info.get("out_path") and Path(ongoing_info["out_path"]).exists():
+                final_path = Path(ongoing_info["out_path"])
+            else:
+                base = Path(out_dir) if out_dir else Path(__file__).resolve().parent
+                final_path = base / f"{_safe_filename(novel_title)}.txt"
+
+        # 기존 파일이 다른 확장자(.epub, .txt)로 다운로드 폴더에 이미 존재하는 경우 자동 연동
+        if not final_path.exists():
+            download_dir = final_path.parent
+            safe_name = _safe_filename(novel_title)
+            for ext in [final_path.suffix, ".epub", ".txt"]:
+                cand = download_dir / f"{safe_name}{ext}"
+                if cand.exists():
+                    final_path = cand
+                    break
+
+        if ongoing_info:
+            ongoing_info["out_path"] = str(final_path)
+            save_ongoing_novel(ongoing_info)
 
         final_path.parent.mkdir(parents=True, exist_ok=True)
 

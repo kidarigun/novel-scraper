@@ -673,6 +673,96 @@ class ExtractBodyTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
 
 
+    def test_norm_title(self):
+        self.assertEqual(scrape_novel._norm_title("내 딸은 최종 보스 [150화]"), "내딸은최종보스")
+        self.assertEqual(scrape_novel._norm_title("내 딸은 최종 보스 (완결)"), "내딸은최종보스")
+        self.assertEqual(scrape_novel._norm_title("내 딸은 최종 보스~150화"), "내딸은최종보스")
+        self.assertEqual(scrape_novel._norm_title("내 딸은 최종 보스"), "내딸은최종보스")
+
+    def test_find_cache_by_title_and_sync(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            old_nid = "57318"
+            old_dir = root / old_nid
+            old_dir.mkdir(parents=True)
+            old_chap = old_dir / "chapters"
+            old_chap.mkdir(parents=True)
+            (old_chap / "0001_101.txt").write_text("1화 내용", encoding="utf-8")
+            (old_chap / "0002_102.txt").write_text("2화 내용", encoding="utf-8")
+            (old_dir / "state.json").write_text(json.dumps({
+                "title": "내 딸은 최종 보스",
+                "url": "https://toki32.com/novel/57318",
+                "done": {
+                    "101": {"idx": 1, "title": "1화", "chars": 10},
+                    "102": {"idx": 2, "title": "2화", "chars": 10},
+                },
+                "total": 2
+            }, ensure_ascii=False), encoding="utf-8")
+
+            # 다른 도메인/새로운 novel_id 에서 동일 소설 캐시 찾기
+            found_nid, found_dir, found_state = scrape_novel.find_cache_by_title(
+                "내 딸은 최종 보스 [300화]", exclude_nid="63744", cache_root=root
+            )
+            self.assertEqual(found_nid, "57318")
+            self.assertIsNotNone(found_state)
+
+            # 새 캐시 폴더 생성 및 동기화 (새로운 episode_id 201, 202)
+            new_dir = root / "63744"
+            new_state = {"done": {}}
+            new_chapters = [
+                {"episode_id": 201, "no": 1, "title": "1화", "url": "https://toki33.com/novel/63744/201"},
+                {"episode_id": 202, "no": 2, "title": "2화", "url": "https://toki33.com/novel/63744/202"},
+                {"episode_id": 203, "no": 3, "title": "3화", "url": "https://toki33.com/novel/63744/203"},
+            ]
+            restored = scrape_novel.sync_cache_from_previous(
+                new_dir, new_state, new_chapters, found_dir, found_state
+            )
+            self.assertEqual(restored, 2)
+            self.assertIn("201", new_state["done"])
+            self.assertIn("202", new_state["done"])
+            self.assertEqual((new_dir / "chapters" / "0001_201.txt").read_text(encoding="utf-8"), "1화 내용")
+            self.assertEqual((new_dir / "chapters" / "0002_202.txt").read_text(encoding="utf-8"), "2화 내용")
+
+    def test_save_ongoing_novel_updates_on_domain_change(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            # 1. toki32 도메인으로 등록
+            scrape_novel.save_ongoing_novel({
+                "novel_id": "57318",
+                "title": "내 딸은 최종 보스",
+                "url": "https://toki32.com/novel/57318",
+                "out_path": "C:/Downloads/내 딸은 최종 보스.epub",
+                "format": "epub"
+            }, cache_root=root)
+
+            novels = scrape_novel.get_ongoing_novels(cache_root=root)
+            self.assertEqual(len(novels), 1)
+            self.assertEqual(novels[0]["novel_id"], "57318")
+
+            # 2. toki33 도메인(새 novel_id: 63744)으로 같은 제목 소설 저장 시 기존 항목 갱신
+            scrape_novel.save_ongoing_novel({
+                "novel_id": "63744",
+                "title": "내 딸은 최종 보스 [300화]",
+                "url": "https://toki33.com/novel/63744",
+            }, cache_root=root)
+
+            novels_updated = scrape_novel.get_ongoing_novels(cache_root=root)
+            # 중복 생성되지 않고 1개만 존재해야 함
+            self.assertEqual(len(novels_updated), 1)
+            # URL과 novel_id가 최신 것으로 갱신됨
+            self.assertEqual(novels_updated[0]["novel_id"], "63744")
+            self.assertEqual(novels_updated[0]["url"], "https://toki33.com/novel/63744")
+            # 기존 out_path와 format은 유지됨
+            self.assertEqual(novels_updated[0]["out_path"], "C:/Downloads/내 딸은 최종 보스.epub")
+            self.assertEqual(novels_updated[0]["format"], "epub")
+
+            # is_ongoing_novel 확인 (새 ID 및 제목으로 모두 확인 가능)
+            self.assertTrue(scrape_novel.is_ongoing_novel("63744", cache_root=root))
+            self.assertTrue(scrape_novel.is_ongoing_novel("내 딸은 최종 보스", cache_root=root))
+
+
 if __name__ == "__main__":
     unittest.main()
 

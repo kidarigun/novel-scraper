@@ -697,17 +697,37 @@ class ScraperGUI:
                         safe_name = scrape_novel._safe_filename(title)
                         ext = ".epub" if self.file_format.get() == "epub" else ".txt"
                         out_file = str(self.get_current_download_dir() / f"{safe_name}{ext}")
+
+                        # 기존 연재 소설 등록 정보 또는 캐시 확인 (URL/도메인 변경 대응)
+                        existing_ongoing = scrape_novel.find_ongoing_by_title(title)
+                        old_nid, old_cache, old_state = scrape_novel.find_cache_by_title(title)
+
+                        if existing_ongoing:
+                            self.is_ongoing_var.set(True)
+                            if existing_ongoing.get("out_path"):
+                                p = Path(existing_ongoing["out_path"])
+                                if p.exists() or p.parent.exists():
+                                    out_file = str(p)
+                            if existing_ongoing.get("format"):
+                                self.file_format.set(existing_ongoing["format"])
+                            self._log(f"[*] 기존 연재 소설 이력 확인: '{title}' (새 URL로 연동되어 업데이트됩니다)")
+                        elif old_cache:
+                            self._log(f"[*] 이전 수집 캐시 이력(ID: {old_nid}) 확인: '{title}'")
+                            if scrape_novel.is_ongoing_novel(old_nid):
+                                self.is_ongoing_var.set(True)
+                        else:
+                            try:
+                                nid = scrape_novel.parse_novel_id(url)
+                                if scrape_novel.is_ongoing_novel(nid):
+                                    self.is_ongoing_var.set(True)
+                            except Exception:
+                                pass
+
                         out_file = re.sub(r"[\r\n\t]+", "", out_file)
                         self.out_var.set(out_file)
                         if self.status_var.get() in ("소설 제목 확인 중…", "시작 중…", ""):
                             self.status_var.set("대기 중")
-                        self._log(f"[*] 소설 제목 확인: {title} -> 저장 파일: {safe_name}{ext}")
-                        try:
-                            nid = scrape_novel.parse_novel_id(url)
-                            if scrape_novel.is_ongoing_novel(nid):
-                                self.is_ongoing_var.set(True)
-                        except Exception:
-                            pass
+                        self._log(f"[*] 소설 제목 확인: {title} -> 저장 파일: {Path(out_file).name}")
                         if self.auto_start_on_clipboard.get() and not (self.worker and self.worker.is_alive()):
                             self.start()
                 elif kind == "progress":
@@ -789,9 +809,18 @@ class ScraperGUI:
         if cached_title:
             safe_name = scrape_novel._safe_filename(cached_title)
             out_file = str(self.get_current_download_dir() / f"{safe_name}{ext}")
+            existing_ongoing = scrape_novel.find_ongoing_by_title(cached_title)
+            if existing_ongoing:
+                self.is_ongoing_var.set(True)
+                if existing_ongoing.get("out_path"):
+                    p = Path(existing_ongoing["out_path"])
+                    if p.exists() or p.parent.exists():
+                        out_file = str(p)
+                if existing_ongoing.get("format"):
+                    self.file_format.set(existing_ongoing["format"])
             out_file = re.sub(r"[\r\n\t]+", "", out_file)
             self.out_var.set(out_file)
-            self._log(f"[*] 소설 제목 확인(이력): {cached_title} -> 저장 파일: {safe_name}{ext}")
+            self._log(f"[*] 소설 제목 확인(이력): {cached_title} -> 저장 파일: {Path(out_file).name}")
             if auto_start and not (self.worker and self.worker.is_alive()):
                 self.start()
         else:
