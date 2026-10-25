@@ -762,6 +762,67 @@ class ExtractBodyTests(unittest.TestCase):
             self.assertTrue(scrape_novel.is_ongoing_novel("63744", cache_root=root))
             self.assertTrue(scrape_novel.is_ongoing_novel("내 딸은 최종 보스", cache_root=root))
 
+    def test_extract_body_filters_puzzle_captcha_text(self):
+        mock_page = _Page({})
+        puzzle_raw = scrape_novel.SEP.join([
+            "퍼즐 조각을 맞춰주세요",
+            "봇 확인 후 컨텐츠 열람 가능합니다.",
+            "밀어서 맞추기",
+            "새로고침",
+        ])
+        setattr(mock_page, "_extracted_novel_data", {
+            "ok": True,
+            "state": "ok",
+            "source": "novel-viewer-p",
+            "length": len(puzzle_raw),
+            "text": puzzle_raw,
+        })
+        self.assertEqual(scrape_novel.extract_body(mock_page, "4화"), "")
+
+    def test_is_corrupted_chapter_text_detects_puzzle_and_chrome(self):
+        corrupted_puzzle = (
+            "\n\n============================================================\n"
+            "무한 전능의 힘을 얻었다 - 4화\n"
+            "============================================================\n\n"
+            "퍼즐 조각을 맞춰주세요\n\n봇 확인 후 컨텐츠 열람 가능합니다.\n\n>\n\n밀어서 맞추기\n\n새로고침"
+        )
+        corrupted_chrome = (
+            "\n\n============================================================\n"
+            "무한 전능의 힘을 얻었다 - 4화\n"
+            "============================================================\n\n"
+            "홈 › 소설 ›무한 전능의 힘을 얻었다 ›4화\n‹ 이전화\n목록\n다음화 ›\n글자\n16px"
+        )
+        valid_chapter = (
+            "\n\n============================================================\n"
+            "무한 전능의 힘을 얻었다 - 4화\n"
+            "============================================================\n\n"
+            "포장마차를 나서니 밤공기가 차가웠다.\n\n시간은 저녁 8시.\n\n어둠이 내려앉은 거리에서 도현수가 내 등을 툭 쳤다."
+        )
+        self.assertTrue(scrape_novel._is_corrupted_chapter_text(corrupted_puzzle))
+        self.assertTrue(scrape_novel._is_corrupted_chapter_text(corrupted_chrome))
+        self.assertFalse(scrape_novel._is_corrupted_chapter_text(valid_chapter))
+
+    def test_detect_existing_chapters_stops_at_corrupted_puzzle_chapter(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            txt_path = Path(tmpdir) / "테스트소설.txt"
+            chapters = [
+                {"episode_id": 101, "no": 1, "title": "1화"},
+                {"episode_id": 102, "no": 2, "title": "2화"},
+                {"episode_id": 103, "no": 3, "title": "3화"},
+            ]
+            content = (
+                "테스트소설\n출처: https://toki35.com/novel/1\n총 3화\n"
+                f"\n\n{'=' * 60}\n1화\n{'=' * 60}\n\n정상적인 1화 본문입니다.\n"
+                f"\n\n{'=' * 60}\n2화\n{'=' * 60}\n\n퍼즐 조각을 맞춰주세요\n봇 확인 후 컨텐츠 열람 가능합니다.\n"
+                f"\n\n{'=' * 60}\n3화\n{'=' * 60}\n\n퍼즐 조각을 맞춰주세요\n"
+            )
+            txt_path.write_text(content, encoding="utf-8")
+            last_idx, base_content = scrape_novel.detect_existing_chapters(txt_path, chapters)
+            self.assertEqual(last_idx, 1)
+            self.assertIn("정상적인 1화 본문입니다.", base_content)
+            self.assertNotIn("퍼즐 조각을 맞춰주세요", base_content)
+
 
 if __name__ == "__main__":
     unittest.main()

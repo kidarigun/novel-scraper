@@ -88,6 +88,18 @@ EXTRACT_JS = r"""
     .replace(/[ \t]+\n/g, '\n')
     .trim();
 
+  const isPuzzleText = (txt) => {
+    if (!txt) return false;
+    return txt.includes('퍼즐 조각을 맞춰주세요') ||
+           txt.includes('봇 확인 후 컨텐츠 열람') ||
+           txt.includes('밀어서 맞추기') ||
+           txt.includes('인증을 준비하지 못했습니다') ||
+           txt.includes('인증 준비 중') ||
+           txt.includes('일시적 오류가 발생했습니다') ||
+           txt.includes('잠시 후 다시 시도해주세요') ||
+           txt.includes('프레임 내부에서는 본문을 표시할 수 없습니다');
+  };
+
   const isIgnored = (node) => {
     for (let current = node; current && current.nodeType === Node.ELEMENT_NODE;
          current = current.parentElement) {
@@ -95,7 +107,7 @@ EXTRACT_JS = r"""
       if (['script', 'style', 'noscript', 'template', 'nav', 'header', 'footer',
            'aside', 'form', 'button'].includes(tag)) return true;
       if (current.matches && current.matches(
-          '[aria-hidden="true"], .advertisement, .ad-banner, .pagination, #viewcomment, .theme-novel-nav, .theme-novel-tools, .page-title')) {
+          '[aria-hidden="true"], .advertisement, .ad-banner, .pagination, #viewcomment, .theme-novel-nav, .theme-novel-tools, .novel-tools, .novel-loading, .page-title')) {
         return true;
       }
     }
@@ -114,6 +126,7 @@ EXTRACT_JS = r"""
       try {
         root.querySelectorAll('*').forEach((element) => {
           if (element.shadowRoot) pending.push(element.shadowRoot);
+          if (element.__novelShadow) pending.push(element.__novelShadow);
           if (element.tagName && element.tagName.toLowerCase() === 'iframe') {
             try {
               if (element.contentDocument) pending.push(element.contentDocument);
@@ -126,6 +139,9 @@ EXTRACT_JS = r"""
   };
 
   const partsFrom = (container) => {
+    const fullRaw = clean(container.innerText || container.textContent);
+    if (isPuzzleText(fullRaw)) return [];
+
     const blockSelector = 'h1,h2,h3,h4,p,pre,blockquote,li,div,span,section';
     let blocks = [];
     try {
@@ -136,13 +152,13 @@ EXTRACT_JS = r"""
     } catch(e) {}
 
     const parts = blocks.map((node) => clean(node.innerText || node.textContent))
-      .filter((txt) => txt.length > 0 && !txt.includes('본문 불러오는 중') && !txt.includes('등록된 회차 댓글이 없습니다'));
+      .filter((txt) => txt.length > 0 && !txt.includes('불러오는 중') && !txt.includes('등록된 회차 댓글이 없습니다') && !isPuzzleText(txt));
     if (parts.length) return parts;
 
-    return clean(container.innerText || container.textContent)
+    return fullRaw
       .split(/\n+/)
       .map(clean)
-      .filter((txt) => txt.length > 0 && !txt.includes('본문 불러오는 중') && !txt.includes('등록된 회차 댓글이 없습니다'));
+      .filter((txt) => txt.length > 0 && !txt.includes('불러오는 중') && !txt.includes('등록된 회차 댓글이 없습니다') && !isPuzzleText(txt));
   };
 
   const bestFor = (selector) => {
@@ -153,7 +169,7 @@ EXTRACT_JS = r"""
           if (isIgnored(container)) return;
           const parts = partsFrom(container);
           const text = parts.join(SEP);
-          if (!text || text.includes('본문 불러오는 중')) return;
+          if (!text || text.includes('불러오는 중') || isPuzzleText(text)) return;
           const score = text.length + Math.min(parts.length, 100) * 40;
           if (!best || score > best.score) best = {selector, parts, text, score};
         });
@@ -162,7 +178,7 @@ EXTRACT_JS = r"""
     return best;
   };
 
-  const selectors = [
+  const dedicatedSelectors = [
     'article.novel-viewer',
     '.novel-viewer',
     '[class*="novel-viewer"]',
@@ -179,15 +195,176 @@ EXTRACT_JS = r"""
     '#view_content',
     '.rd_body',
     '.view-content',
-    '#view_atcl',
+    '#view_atcl'
+  ];
+
+  const fallbackSelectors = [
     'article',
     'main'
   ];
 
   const extract = () => {
-    for (const selector of selectors) {
+    try {
+      const tts = window.__novelTTSText;
+      if (typeof tts === 'string' && tts.trim().length >= MIN_LENGTH && !isPuzzleText(tts)) {
+        const parts = tts.split(/\n+/).map(clean).filter(Boolean);
+        if (parts.length > 0) {
+          const text = parts.join(SEP);
+          return { selector: 'window-novel-tts', parts, text, score: text.length + 4000 };
+        }
+      }
+    } catch(e) {}
+
+    try {
+      const els = document.querySelectorAll('*');
+      for (let i = 0; i < els.length; i++) {
+        const sh = els[i].__novelShadow;
+        if (sh) {
+          const ps = Array.from(sh.querySelectorAll('p, .novel-epub-rendered'));
+          const parts = ps.map(n => clean(n.innerText || n.textContent)).filter(t => t.length > 0 && !isPuzzleText(t));
+          if (parts.length > 0) {
+            const text = parts.join(SEP);
+            if (text.length >= MIN_LENGTH) {
+              return { selector: 'novel-closed-shadow', parts, text, score: text.length + 3500 };
+            }
+          }
+        }
+      }
+    } catch(e) {}
+
+    for (const selector of dedicatedSelectors) {
       const candidate = bestFor(selector);
       if (candidate && candidate.text.length >= MIN_LENGTH) return candidate;
+    }
+
+    const hasDedicatedContainer = Boolean(
+      document.querySelector('article.novel-viewer, .novel-viewer, [class*="novel-viewer"], [data-theme-novel-content], .theme-novel-content, #novel_content, #bo_v_atcl')
+    );
+    if (!hasDedicatedContainer) {
+      for (const selector of fallbackSelectors) {
+        const candidate = bestFor(selector);
+        if (candidate && candidate.text.length >= MIN_LENGTH) return candidate;
+      }
+    }
+    return null;
+  };
+
+  const solvePuzzleCaptchaInPage = async (nvCookieHint) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const headers = { 'content-type': 'application/json', 'x-novel-client': 'shadow-v3' };
+        if (nvCookieHint) headers['x-nv-session'] = nvCookieHint;
+        const r = await fetch('/api/novel-captcha/create', {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: headers
+        });
+        const cj = await r.json().catch(() => ({}));
+        if (!r.ok || !cj.ok || !cj.challenge) continue;
+        const ch = cj.challenge;
+
+        const loadImg = (src) => new Promise((res, rej) => {
+          const img = new Image();
+          img.onload = () => res(img);
+          img.onerror = rej;
+          img.src = src;
+        });
+
+        const [bgImg, pcImg] = await Promise.all([loadImg(ch.background), loadImg(ch.piece)]);
+        const W = ch.width, H = ch.height, pw = ch.pieceWidth, ph = ch.pieceHeight, py = ch.y;
+
+        const bgCanvas = document.createElement('canvas');
+        bgCanvas.width = W; bgCanvas.height = H;
+        const bgCtx = bgCanvas.getContext('2d');
+        bgCtx.drawImage(bgImg, 0, 0, W, H);
+        const bgData = bgCtx.getImageData(0, py, W, ph).data;
+
+        const pcCanvas = document.createElement('canvas');
+        pcCanvas.width = pw; pcCanvas.height = ph;
+        const pcCtx = pcCanvas.getContext('2d');
+        pcCtx.drawImage(pcImg, 0, 0, pw, ph);
+        const pcData = pcCtx.getImageData(0, 0, pw, ph).data;
+
+        const borderCoords = [];
+        const innerCoords = [];
+        const alphaAt = (x, y) => {
+          if (x < 0 || x >= pw || y < 0 || y >= ph) return 0;
+          return pcData[(y * pw + x) * 4 + 3];
+        };
+        for (let y = 0; y < ph; y++) {
+          for (let x = 0; x < pw; x++) {
+            if (alphaAt(x, y) > 200) {
+              if (alphaAt(x-1, y) <= 200 || alphaAt(x+1, y) <= 200 || alphaAt(x, y-1) <= 200 || alphaAt(x, y+1) <= 200 ||
+                  alphaAt(x-2, y) <= 200 || alphaAt(x+2, y) <= 200 || alphaAt(x, y-2) <= 200 || alphaAt(x, y+2) <= 200) {
+                borderCoords.push([x, y]);
+              } else {
+                innerCoords.push([x, y]);
+              }
+            }
+          }
+        }
+
+        let bestX = 0, bestScore = -1e9;
+        for (let x = 0; x <= W - pw; x++) {
+          let bSum = 0, bStdSum = 0;
+          for (let i = 0; i < borderCoords.length; i++) {
+            const bx = x + borderCoords[i][0], by = borderCoords[i][1];
+            const idx = (by * W + bx) * 4;
+            const cr = bgData[idx], cg = bgData[idx+1], cb = bgData[idx+2];
+            const mean = (cr + cg + cb) / 3;
+            bSum += mean;
+            bStdSum += Math.abs(cr - mean) + Math.abs(cg - mean) + Math.abs(cb - mean);
+          }
+          let iSum = 0;
+          for (let i = 0; i < innerCoords.length; i++) {
+            const ix = x + innerCoords[i][0], iy = innerCoords[i][1];
+            const idx = (iy * W + ix) * 4;
+            iSum += (bgData[idx] + bgData[idx+1] + bgData[idx+2]) / 3;
+          }
+          const bMean = bSum / Math.max(1, borderCoords.length);
+          const bStd = bStdSum / Math.max(1, borderCoords.length);
+          const iMean = iSum / Math.max(1, innerCoords.length);
+          const score = bMean - iMean - bStd * 0.5;
+          if (score > bestScore) {
+            bestScore = score;
+            bestX = x;
+          }
+        }
+
+        const duration = 700 + Math.floor(Math.random() * 250);
+        await new Promise(res => setTimeout(res, duration));
+        const steps = 18;
+        const trail = [];
+        const baseY = 260;
+        for (let s = 0; s <= steps; s++) {
+          const p = s / steps;
+          const ease = 1 - Math.pow(1 - p, 2);
+          const curX = Math.round(bestX * ease * 10) / 10;
+          const curY = baseY + Math.round(Math.sin(p * Math.PI) * 2);
+          const curT = Math.round(duration * p);
+          trail.push({ x: s === steps ? bestX : curX, y: curY, t: curT });
+        }
+
+        const vr = await fetch('/api/novel-captcha/verify', {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: headers,
+          body: JSON.stringify({
+            challengeId: ch.challengeId,
+            x: bestX,
+            y: ch.y,
+            trail: trail
+          })
+        });
+        const vj = await vr.json().catch(() => ({}));
+        if (vr.ok && vj.ok && typeof vj.token === 'string') {
+          try { window.sessionStorage.setItem('novelCaptchaToken', vj.token); } catch(e) {}
+          window.__puzzle_solved_count = (window.__puzzle_solved_count || 0) + 1;
+          return vj.token;
+        }
+      } catch(e) {}
     }
     return null;
   };
@@ -276,22 +453,51 @@ EXTRACT_JS = r"""
       if (!nvCookie) nvCookie = readCookie("nv");
       if (!nvCookie) return null;
 
-      const nonce = makeNonce();
-      const proof = await hmacSha256B64(nvCookie, String(cfg.token) + "." + nonce);
+      let savedCaptchaToken = "";
+      try { savedCaptchaToken = window.sessionStorage.getItem("novelCaptchaToken") || ""; } catch(e) {}
 
-      const contentRes = await fetch("/api/novel-content", {
-        method: "POST",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: {
-          "content-type": "application/json",
-          "x-novel-client": "shadow-v3",
-          "x-nv-session": nvCookie
-        },
-        body: JSON.stringify({ novelId: cfg.novelId, episodeId: cfg.episodeId, token: cfg.token, nonce: nonce, proof: proof })
-      });
+      const requestNovelContent = async (cToken) => {
+        const latestNv = readCookie("nv");
+        if (latestNv && latestNv.length >= 40) nvCookie = latestNv;
+        const nonce = makeNonce();
+        const proof = await hmacSha256B64(nvCookie, String(cfg.token) + "." + nonce);
+        const reqBody = { novelId: cfg.novelId, episodeId: cfg.episodeId, token: cfg.token, nonce: nonce, proof: proof };
+        if (cToken) reqBody.captchaToken = cToken;
+        const contentRes = await fetch("/api/novel-content", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {
+            "content-type": "application/json",
+            "x-novel-client": "shadow-v3",
+            "x-nv-session": nvCookie
+          },
+          body: JSON.stringify(reqBody)
+        });
+        const jsonRes = await contentRes.json().catch(() => ({}));
+        return { contentRes, jsonRes };
+      };
 
-      const jsonRes = await contentRes.json().catch(() => ({}));
+      let { contentRes, jsonRes } = await requestNovelContent(savedCaptchaToken);
+
+      if (contentRes.status === 403 && jsonRes && (jsonRes.error === "ad_ack_required" || jsonRes.error === "fingerprint_required")) {
+        try {
+          window.dispatchEvent(new CustomEvent("ntk-ack-rearm", {
+            detail: { reason: "novel-content-403", scope: "novel:" + cfg.novelId + ":" + cfg.episodeId }
+          }));
+        } catch(e) {}
+        await new Promise(res => setTimeout(res, 500));
+        ({ contentRes, jsonRes } = await requestNovelContent(savedCaptchaToken));
+      }
+
+      // 429 또는 퍼즐 캡차 요구 시 즉시 자동으로 퍼즐을 풀고 재요청
+      if (contentRes.status === 429 || (jsonRes && jsonRes.error === "captcha_required_daily_quota")) {
+        const solvedToken = await solvePuzzleCaptchaInPage(nvCookie);
+        if (solvedToken) {
+          ({ contentRes, jsonRes } = await requestNovelContent(solvedToken));
+        }
+      }
+
       if (!contentRes.ok || !jsonRes.ok || !jsonRes.payload) {
         if (jsonRes && jsonRes.error) {
           window.__api_extract_error = jsonRes.error;
@@ -303,6 +509,7 @@ EXTRACT_JS = r"""
         return null;
       }
 
+      window.__api_extract_error = "";
       const nvKey = fromB64Url(nvCookie.split(".")[0] || "");
       const enc = new TextEncoder();
       const tail = enc.encode(":" + cfg.novelId + ":" + cfg.episodeId + ":v3");
@@ -338,6 +545,7 @@ EXTRACT_JS = r"""
         lines = String(decoded || "").split(/\n{2,}/).map(s => s.trim()).filter(s => s.length > 0);
       }
 
+      lines = lines.filter(s => !isPuzzleText(s));
       if (lines.length > 0) {
         const text = lines.join(SEP);
         return { selector: 'api-direct-decrypt', parts: lines, text, score: text.length + 5000 };
@@ -347,9 +555,10 @@ EXTRACT_JS = r"""
   };
 
   const finish = (candidate, timedOut) => {
+    const isValid = Boolean(candidate && candidate.text.length >= MIN_LENGTH && !isPuzzleText(candidate.text));
     const result = {
-      ok: Boolean(candidate && candidate.text.length >= MIN_LENGTH),
-      state: candidate ? (timedOut ? 'short-content' : 'ok') : 'no-content-candidate',
+      ok: isValid,
+      state: isValid ? 'ok' : (candidate ? 'short-content' : 'no-content-candidate'),
       source: candidate ? candidate.selector : '',
       length: candidate ? candidate.text.length : 0,
       text: candidate ? candidate.text : ''
@@ -375,7 +584,7 @@ EXTRACT_JS = r"""
     if (!candidate) {
       candidate = extract();
     }
-    if ((candidate && candidate.text.length >= MIN_LENGTH) || Date.now() - start > maxMs) {
+    if ((candidate && candidate.text.length >= MIN_LENGTH && !isPuzzleText(candidate.text)) || Date.now() - start > maxMs) {
       finish(candidate, Date.now() - start > maxMs);
       return;
     }
@@ -387,8 +596,36 @@ EXTRACT_JS = r"""
 
 JUNK_PATTERNS = [
     re.compile(r"본문\s*불러오는\s*중"),
+    re.compile(r"^\s*불러오는\s*중\.{0,3}\s*$"),
     re.compile(r"^\s*광고\s*$"),
+    re.compile(r"퍼즐\s*조각을\s*맞춰주세요"),
+    re.compile(r"봇\s*확인\s*후\s*컨텐츠\s*열람"),
+    re.compile(r"^\s*밀어서\s*맞추기\s*$"),
+    re.compile(r"^\s*새로고침\s*$"),
+    re.compile(r"인증을\s*준비하지\s*못했습니다"),
+    re.compile(r"^\s*인증\s*준비\s*중"),
+    re.compile(r"일시적\s*오류가\s*발생했습니다"),
+    re.compile(r"잠시\s*후\s*다시\s*시도해주세요"),
 ]
+
+
+def _is_corrupted_chapter_text(text: str) -> bool:
+    """퍼즐 캡차 안내 문구나 네비게이션 크롬 텍스트로 잘못 저장된 챕터 본문인지 판별."""
+    if not text or not text.strip():
+        return True
+    if ("퍼즐 조각을 맞춰주세요" in text or
+            "봇 확인 후 컨텐츠 열람" in text or
+            "밀어서 맞추기" in text or
+            "인증을 준비하지 못했습니다" in text or
+            "일시적 오류가 발생했습니다" in text):
+        return True
+    # 헤더(=== ... ===)를 제외한 순수 본문 추출
+    body_only = re.sub(r"^[\s\S]*?={40,}\n[^\n]+\n={40,}\s*", "", text).strip()
+    if not body_only:
+        return True
+    if "홈 › 소설 ›" in body_only and len(body_only) < 700:
+        return True
+    return False
 
 
 class StopScrape(Exception):
@@ -449,25 +686,156 @@ def parse_novel_id(list_url):
     return m.group(1)
 
 
+CALC_DOM_PUZZLE_JS = """
+() => {
+  const btn = document.querySelector('button[aria-label="퍼즐 슬라이더"]');
+  if (!btn) return { found: false };
+  const track = btn.parentElement;
+  if (!track) return { found: false };
+  const card = track.parentElement;
+  if (!card) return { found: false };
+  const imgs = card.querySelectorAll('img');
+  if (imgs.length < 2) return { found: false, waitingImages: true };
+
+  const bgImg = imgs[0];
+  const pcImg = imgs[1];
+  if (!bgImg.complete || !pcImg.complete || !bgImg.naturalWidth || !pcImg.naturalWidth) {
+    return { found: false, waitingImages: true };
+  }
+
+  const W = bgImg.naturalWidth || 320;
+  const H = bgImg.naturalHeight || 160;
+  const pw = pcImg.naturalWidth || 60;
+  const ph = pcImg.naturalHeight || 60;
+  const topPct = parseFloat(pcImg.style.top || '0') || 0;
+  const py = Math.round(topPct * H / 100);
+
+  const bgCanvas = document.createElement('canvas');
+  bgCanvas.width = W; bgCanvas.height = H;
+  const bgCtx = bgCanvas.getContext('2d');
+  bgCtx.drawImage(bgImg, 0, 0, W, H);
+  const bgData = bgCtx.getImageData(0, py, W, ph).data;
+
+  const pcCanvas = document.createElement('canvas');
+  pcCanvas.width = pw; pcCanvas.height = ph;
+  const pcCtx = pcCanvas.getContext('2d');
+  pcCtx.drawImage(pcImg, 0, 0, pw, ph);
+  const pcData = pcCtx.getImageData(0, 0, pw, ph).data;
+
+  const borderCoords = [];
+  const innerCoords = [];
+  const alphaAt = (x, y) => {
+    if (x < 0 || x >= pw || y < 0 || y >= ph) return 0;
+    return pcData[(y * pw + x) * 4 + 3];
+  };
+  for (let y = 0; y < ph; y++) {
+    for (let x = 0; x < pw; x++) {
+      if (alphaAt(x, y) > 200) {
+        if (alphaAt(x-1, y) <= 200 || alphaAt(x+1, y) <= 200 || alphaAt(x, y-1) <= 200 || alphaAt(x, y+1) <= 200 ||
+            alphaAt(x-2, y) <= 200 || alphaAt(x+2, y) <= 200 || alphaAt(x, y-2) <= 200 || alphaAt(x, y+2) <= 200) {
+          borderCoords.push([x, y]);
+        } else {
+          innerCoords.push([x, y]);
+        }
+      }
+    }
+  }
+
+  let bestX = 0, bestScore = -1e9;
+  for (let x = 0; x <= W - pw; x++) {
+    let bSum = 0, bStdSum = 0;
+    for (let i = 0; i < borderCoords.length; i++) {
+      const bx = x + borderCoords[i][0], by = borderCoords[i][1];
+      const idx = (by * W + bx) * 4;
+      const cr = bgData[idx], cg = bgData[idx+1], cb = bgData[idx+2];
+      const mean = (cr + cg + cb) / 3;
+      bSum += mean;
+      bStdSum += Math.abs(cr - mean) + Math.abs(cg - mean) + Math.abs(cb - mean);
+    }
+    let iSum = 0;
+    for (let i = 0; i < innerCoords.length; i++) {
+      const ix = x + innerCoords[i][0], iy = innerCoords[i][1];
+      const idx = (iy * W + ix) * 4;
+      iSum += (bgData[idx] + bgData[idx+1] + bgData[idx+2]) / 3;
+    }
+    const bMean = bSum / Math.max(1, borderCoords.length);
+    const bStd = bStdSum / Math.max(1, borderCoords.length);
+    const iMean = iSum / Math.max(1, innerCoords.length);
+    const score = bMean - iMean - bStd * 0.5;
+    if (score > bestScore) {
+      bestScore = score;
+      bestX = x;
+    }
+  }
+
+  btn.scrollIntoView({ block: 'center', inline: 'center' });
+  const trackRect = track.getBoundingClientRect();
+  const btnRect = btn.getBoundingClientRect();
+  const maxPieceX = Math.max(1, W - pw);
+  const maxTrackX = Math.max(1, trackRect.width - 44);
+  const deltaClientX = bestX * (maxTrackX / maxPieceX);
+
+  return {
+    found: true,
+    bestX,
+    py,
+    deltaClientX,
+    startX: btnRect.left + btnRect.width / 2,
+    startY: btnRect.top + btnRect.height / 2
+  };
+}
+"""
+
+
+def _solve_dom_puzzle_if_present(page):
+    """화면에 퍼즐 슬라이더 DOM이 렌더링되어 있을 때 마우스 드래그로 퍼즐을 해결."""
+    try:
+        info = page.evaluate(CALC_DOM_PUZZLE_JS)
+        if not isinstance(info, dict) or not info.get("found"):
+            return False
+        sx = float(info["startX"])
+        sy = float(info["startY"])
+        dx = float(info["deltaClientX"])
+        page.mouse.move(sx, sy)
+        page.mouse.down()
+        steps = 18
+        for s in range(1, steps + 1):
+            p = s / steps
+            ease = 1.0 - (1.0 - p) ** 2
+            cx = sx + dx * ease
+            cy = sy + (2.0 if s % 2 == 0 else 0.0)
+            page.mouse.move(cx, cy)
+            page.wait_for_timeout(42)
+        page.mouse.up()
+        page.wait_for_timeout(800)
+        return True
+    except Exception:
+        return False
+
+
 def make_body_action(max_ms, site_type=None):
     """회차 본문 추출 action. 사이트 유형에 따라 엄격히 분리된 로직 실행."""
     def act(page):
         start_time = time.time()
         deadline = start_time + (max_ms / 1000.0)
 
-        # 1. 초고속 인페이지 API 복호화 및 DOM 추출 (0.1~0.5초 이내 완료)
+        # 1. 초고속 인페이지 API 복호화 및 DOM 추출 (429 퍼즐 발생 시 자동 해결 포함)
         try:
             remaining_ms = max(200, int((deadline - time.time()) * 1000))
-            res = page.evaluate(EXTRACT_JS, min(1000, remaining_ms))
+            res = page.evaluate(EXTRACT_JS, min(1000, max(200, remaining_ms // 2)))
             if isinstance(res, dict) and res.get("ok"):
                 setattr(page, "_extracted_novel_data", res)
                 return page
         except Exception:
             pass
 
-        # 2. toki_app 사이트 전용 또는 site_type 미지정 시 closed shadow DOM 피어싱 탐색
+        # 2. toki_app 사이트 전용 또는 site_type 미지정 시 closed shadow DOM 피어싱 및 DOM 퍼즐 해결 탐색
         if site_type == SITE_TOKI_APP or site_type is None:
             while time.time() < deadline:
+                try:
+                    _solve_dom_puzzle_if_present(page)
+                except Exception:
+                    pass
                 try:
                     lines = page.evaluate("""() => {
                         const ps = Array.from(document.querySelectorAll('article.novel-viewer p, .novel-viewer p, [class*="novel-viewer"] p'));
@@ -489,20 +857,21 @@ def make_body_action(max_ms, site_type=None):
                         ]
                         if clean_lines and len(SEP.join(clean_lines)) >= 20:
                             text = SEP.join(clean_lines)
-                            data_res = {
-                                "ok": True,
-                                "state": "ok",
-                                "source": "novel-viewer-p",
-                                "length": len(text),
-                                "text": text,
-                            }
-                            setattr(page, "_extracted_novel_data", data_res)
-                            return page
+                            if not _is_corrupted_chapter_text(text.replace(SEP, "\n")):
+                                data_res = {
+                                    "ok": True,
+                                    "state": "ok",
+                                    "source": "novel-viewer-p",
+                                    "length": len(text),
+                                    "text": text,
+                                }
+                                setattr(page, "_extracted_novel_data", data_res)
+                                return page
                 except Exception:
                     pass
                 if site_type == SITE_TOKI_APP:
                     try:
-                        res = page.evaluate(EXTRACT_JS, 300)
+                        res = page.evaluate(EXTRACT_JS, 1200)
                         if isinstance(res, dict) and res.get("ok"):
                             setattr(page, "_extracted_novel_data", res)
                             return page
@@ -512,11 +881,11 @@ def make_body_action(max_ms, site_type=None):
                 else:
                     break
 
-        # 2. 기존 newtoki 사이트 전용 (또는 site_type is None): 직접 API 복호화 및 오픈 shadow DOM 탐색 (기존 검증된 로직 100% 동일)
+        # 3. 기존 newtoki 사이트 전용 (또는 site_type is None): 직접 API 복호화 및 오픈 shadow DOM 탐색
         while time.time() < deadline:
             try:
                 remaining_ms = max(200, int((deadline - time.time()) * 1000))
-                res = page.evaluate(EXTRACT_JS, min(800, remaining_ms))
+                res = page.evaluate(EXTRACT_JS, min(1200, remaining_ms))
                 if isinstance(res, dict) and res.get("ok"):
                     setattr(page, "_extracted_novel_data", res)
                     return page
@@ -1654,6 +2023,8 @@ def _recover_from_txt_if_needed(final_path, url, chapters, chapters_dir, state, 
                     start_pos = m.start()
                     end_pos = matches[idx + 1].start() if idx + 1 < len(matches) else len(content)
                     ch_text = content[start_pos:end_pos]
+                    if _is_corrupted_chapter_text(ch_text):
+                        continue
                     ch_file = chapters_dir / f"{ch_idx:04d}_{ch['episode_id']}.txt"
                     if not ch_file.exists():
                         ch_file.write_text(ch_text, encoding="utf-8")
@@ -1930,7 +2301,11 @@ def sync_cache_from_previous(current_cache_dir, current_state, chapters, old_cac
         cur_ch_file = cur_chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
 
         if cur_key in cur_done and cur_ch_file.exists() and cur_ch_file.stat().st_size > 0:
-            continue
+            try:
+                if not _is_corrupted_chapter_text(cur_ch_file.read_text(encoding="utf-8", errors="ignore")):
+                    continue
+            except Exception:
+                pass
 
         matched_ep_id = None
         matched_info = None
@@ -1956,6 +2331,9 @@ def sync_cache_from_previous(current_cache_dir, current_state, chapters, old_cac
 
         if source_file and source_file.exists() and source_file.stat().st_size > 0:
             try:
+                src_text = source_file.read_text(encoding="utf-8", errors="ignore")
+                if _is_corrupted_chapter_text(src_text):
+                    continue
                 shutil.copy2(source_file, cur_ch_file)
                 chars = matched_info.get("chars", 0) if matched_info else source_file.stat().st_size
                 cur_done[cur_key] = {
@@ -2166,8 +2544,20 @@ def detect_existing_chapters(final_path, chapters):
     if final_path.suffix.lower() == ".epub":
         try:
             with zipfile.ZipFile(final_path, "r") as zf:
-                ch_files = [f for f in zf.namelist() if f.startswith("OEBPS/chapter_") and f.endswith(".xhtml")]
-                return min(len(ch_files), len(chapters)), ""
+                ch_files = sorted(f for f in zf.namelist() if f.startswith("OEBPS/chapter_") and f.endswith(".xhtml"))
+                valid_count = 0
+                for cf in ch_files:
+                    try:
+                        xhtml_txt = zf.read(cf).decode("utf-8", errors="ignore")
+                        if ("퍼즐 조각을 맞춰주세요" in xhtml_txt or
+                                "봇 확인 후 컨텐츠 열람" in xhtml_txt or
+                                "밀어서 맞추기" in xhtml_txt or
+                                "일시적 오류가 발생했습니다" in xhtml_txt):
+                            break
+                        valid_count += 1
+                    except Exception:
+                        break
+                return min(valid_count, len(chapters)), ""
         except Exception:
             return 0, ""
     try:
@@ -2177,8 +2567,20 @@ def detect_existing_chapters(final_path, chapters):
         if not matches:
             return 0, ""
 
-        count = len(matches)
-        last_m = matches[-1]
+        valid_matches = []
+        for idx, m in enumerate(matches):
+            start_pos = m.start()
+            end_pos = matches[idx + 1].start() if idx + 1 < len(matches) else len(content)
+            ch_text = content[start_pos:end_pos]
+            if _is_corrupted_chapter_text(ch_text):
+                break
+            valid_matches.append(m)
+
+        if not valid_matches:
+            return 0, ""
+
+        count = len(valid_matches)
+        last_m = valid_matches[-1]
         last_title = last_m.group(1).strip()
 
         matched_idx = None
@@ -2390,9 +2792,29 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
         total = len(chapters)
+
+        # 기존 캐시 챕터 파일 중 퍼즐/오류 문구로 오염된 파일 자동 정리
+        corrupted_removed = 0
+        for idx, ch in enumerate(chapters, start=1):
+            key = str(ch["episode_id"])
+            ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
+            if ch_file.exists():
+                try:
+                    if _is_corrupted_chapter_text(ch_file.read_text(encoding="utf-8", errors="ignore")):
+                        ch_file.unlink(missing_ok=True)
+                        state.get("done", {}).pop(key, None)
+                        corrupted_removed += 1
+                except Exception:
+                    pass
+        if corrupted_removed > 0:
+            log(f"[*] 이전 수집본 중 퍼즐/오류 화면으로 잘못 저장된 {corrupted_removed}개 챕터를 감지하여 재수집 대상으로 전환했습니다.")
+
         _save_state(state_path, state, title=novel_title, url=url, total=total)
 
-        existing_count, base_content = detect_existing_chapters(final_path, chapters)
+        if corrupted_removed > 0:
+            existing_count, base_content = 0, ""
+        else:
+            existing_count, base_content = detect_existing_chapters(final_path, chapters)
         if existing_count > 0:
             log(f"[*] 기존 파일({final_path.name}) 분석: {existing_count}화까지 이미 포함되어 있음을 확인했습니다.")
             for i in range(1, existing_count + 1):
@@ -2421,13 +2843,20 @@ def scrape(url, out_path=None, *, out_dir=None, min_delay=15.0, max_delay=20.0,
                 key = str(ch["episode_id"])
                 ch_file = chapters_dir / f"{idx:04d}_{ch['episode_id']}.txt"
                 if key in state["done"] and ch_file.exists():
-                    log(f"[{idx}/{total}] 건너뜀(완료): {ch['title']}")
-                    # 이미 완료된 회차를 건너뛰는 경우: 이전 실패와의 일련번호 연속성이 끊어짐
-                    consecutive_fail = 0
-                    last_failed_idx = None
-                    if on_progress:
-                        on_progress(idx, total)
-                    continue
+                    try:
+                        if _is_corrupted_chapter_text(ch_file.read_text(encoding="utf-8", errors="ignore")):
+                            ch_file.unlink(missing_ok=True)
+                            state["done"].pop(key, None)
+                        else:
+                            log(f"[{idx}/{total}] 건너뜀(완료): {ch['title']}")
+                            # 이미 완료된 회차를 건너뛰는 경우: 이전 실패와의 일련번호 연속성이 끊어짐
+                            consecutive_fail = 0
+                            last_failed_idx = None
+                            if on_progress:
+                                on_progress(idx, total)
+                            continue
+                    except Exception:
+                        pass
 
                 log(f"[{idx}/{total}] 수집: {ch['title']}")
                 page = fetch_with_retry(session, ch["url"], page_action=body_action,
